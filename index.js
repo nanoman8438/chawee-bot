@@ -35,7 +35,7 @@ async function askGroq(userText, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
       const message = await groq.chat.completions.create({
-        model: 'mixtral-8x7b-32768',
+        model: 'llama-3.3-70b-versatile',
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: userText },
