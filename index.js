@@ -31,7 +31,7 @@ const lineClient = new Client(lineConfig);
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 function isTriggered(text) {
-  return TRIGGER_KEYWORDS.some((keyword) => text.includes(keyword));
+  return /@?ชาวี/.test(text);
 }
 
 async function askGroq(userText, { isRandom = false } = {}, retries = 3) {
