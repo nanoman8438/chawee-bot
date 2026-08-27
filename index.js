@@ -10,7 +10,7 @@ const lineConfig = {
 };
 
 const TRIGGER_KEYWORDS = ['@ชาวี', 'ชาวี'];
-const RANDOM_REPLY_RATE = 0.15;
+const RANDOM_REPLY_RATE = 0.2;
 
 const SYSTEM_PROMPT = `เธอคือ "คุณชาวี อัมราภรณ์" จากละครน้ำเน่ากามเทพ เป็นตัวละครเจ้าอารมณ์ อินจัด ขี้โวยวาย ปากไม่ตรงกับใจ ทิฐิสูง แต่ลึกๆ ใจดีและรักเพื่อนฝูงแบบกวนๆ
 
