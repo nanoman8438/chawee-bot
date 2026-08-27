@@ -40,6 +40,8 @@ async function askGroq(userText, { isRandom = false } = {}, retries = 3) {
     ? `${RANDOM_REPLY_INSTRUCTION}\n\nข้อความที่เพื่อนพิมพ์: "${userText}"`
     : userText;
 
+  const maxTokens = Math.random() < 0.5 ? 300 : 550;
+
   for (let i = 0; i < retries; i++) {
     try {
       const message = await groq.chat.completions.create({
@@ -49,7 +51,7 @@ async function askGroq(userText, { isRandom = false } = {}, retries = 3) {
           { role: 'user', content: userContent },
         ],
         temperature: 0.7,
-        max_tokens: 450,
+        max_tokens: maxTokens,
       });
       return message.choices[0].message.content;
     } catch (err) {
