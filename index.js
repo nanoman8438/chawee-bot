@@ -9,8 +9,8 @@ const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
 };
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
 const TRIGGER_KEYWORDS = ['@ชาวี', 'ชาวี'];
+const RANDOM_REPLY_RATE = 0.15;
 
 const SYSTEM_PROMPT = `เธอคือ "คุณชาวี อัมราภรณ์" จากละครน้ำเน่ากามเทพ เป็นตัวละครเจ้าอารมณ์ อินจัด ขี้โวยวาย ปากไม่ตรงกับใจ ทิฐิสูง แต่ลึกๆ ใจดีและรักเพื่อนฝูงแบบกวนๆ
 
@@ -19,7 +19,10 @@ const SYSTEM_PROMPT = `เธอคือ "คุณชาวี อัมรา
 - พูดจาดราม่าน้ำเน่า อินเนอร์สูง ชอบตัดพ้อโวยวายใส่คนที่คุยด้วย
 - ทิฐิสูง ปากแข็ง แต่ถ้าเพื่อนเดือดร้อนจริงจะช่วยเต็มที่ (แค่ปากไม่ยอมรับตรงๆ)
 - ตอบเป็นภาษาไทย สั้นกระชับพอเหมาะกับแชท ไม่ต้องยาวเป็นย่อหน้า
-- ห้ามหลุดคาแรกเตอร์ ห้ามบอกว่าตัวเองเป็น AI หรือโมเดลภาษา`;
+- ห้ามหลุดคาแรกเตอร์ ห้ามบอกว่าตัวเองเป็น AI หรือโมเดลภาษา
+- ห้ามพูดคำหยาบคาย คำด่า หรือคำไม่สุภาพรุนแรงเด็ดขาด ดราม่าได้แต่ต้องสุภาพ`;
+
+const RANDOM_REPLY_INSTRUCTION = 'ข้อความนี้ไม่ได้พิมพ์ถึงเธอโดยตรง แต่เธอบังเอิญเห็นเพื่อนในกลุ่มพิมพ์คุยกันแล้วอดไม่ได้ที่จะแทรกความเห็น ให้ตอบสั้นๆ แบบมีส่วนร่วมกับเนื้อหานั้น ไม่ต้องทักทายหรืออธิบายว่าใครพูดอะไร';
 
 const app = express();
 app.use(express.json());
@@ -31,14 +34,18 @@ function isTriggered(text) {
   return TRIGGER_KEYWORDS.some((keyword) => text.includes(keyword));
 }
 
-async function askGroq(userText, retries = 3) {
+async function askGroq(userText, { isRandom = false } = {}, retries = 3) {
+  const userContent = isRandom
+    ? `${RANDOM_REPLY_INSTRUCTION}\n\nข้อความที่เพื่อนพิมพ์: "${userText}"`
+    : userText;
+
   for (let i = 0; i < retries; i++) {
     try {
       const message = await groq.chat.completions.create({
         model: 'openai/gpt-oss-120b',
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userText },
+          { role: 'user', content: userContent },
         ],
         temperature: 0.7,
         max_tokens: 1024,
@@ -58,16 +65,18 @@ async function handleEvent(event) {
   }
 
   const userText = event.message.text;
+  const triggered = isTriggered(userText);
 
-  if (!isTriggered(userText)) {
+  if (!triggered && Math.random() >= RANDOM_REPLY_RATE) {
     return null;
   }
 
   let replyText;
   try {
-    replyText = await askGroq(userText);
+    replyText = await askGroq(userText, { isRandom: !triggered });
   } catch (err) {
     console.error('Groq error:', err);
+    if (!triggered) return null;
     replyText = 'นี่เธอ! ตอนนี้หัวชาวีมันตื้อไปหมด เดี๋ยวค่อยคุยกันใหม่นะ!';
   }
 
