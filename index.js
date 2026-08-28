@@ -39,7 +39,6 @@ const userNames = new Set();
 const groupIds = new Set();
 
 const app = express();
-app.use(express.json());
 
 const lineClient = new Client(lineConfig);
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -173,7 +172,7 @@ async function handleEvent(event) {
   }
 }
 
-app.post('/webhook', (req, res) => {
+app.post('/webhook', middleware(lineConfig), (req, res) => {
   console.log('Webhook received:', JSON.stringify(req.body, null, 2));
 
   if (!req.body.events || req.body.events.length === 0) {
