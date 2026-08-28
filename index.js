@@ -307,6 +307,36 @@ async function askGroq(userText, { isRandom = false, displayName = null } = {}, 
   }
 }
 
+function detectIntent(text) {
+  if (/สภาพอากาศ|อากาศ(เป็นไง|วันนี้|ตอนนี้)?|ฝนตก|ร้อนไหม|weather/i.test(text)) return 'weather';
+  if (/ข่าว(เด่น|วันนี้|ล่าสุด)?|news/i.test(text)) return 'news';
+  return null;
+}
+
+async function answerWeatherQuery(displayName) {
+  const weather = await getWeatherReport();
+  if (!weather) {
+    return 'นี่เธอ! ตอนนี้ชาวีเช็คอากาศให้ไม่ได้ เน็ตมันดื้อขึ้นมาดื้อๆ เดี๋ยวลองถามใหม่อีกทีนะ';
+  }
+  const weatherData = `กรุงเทพฯ ตอนนี้ ${weather.temp}°C รู้สึกเหมือน ${weather.feelsLike}°C สภาพอากาศ: ${weather.description} ความชื้น ${weather.humidity}%`;
+  return askGroq(
+    `มีคนถามสภาพอากาศตอนนี้ ให้ตอบโดยอ้างอิงข้อมูลจริงนี้เท่านั้น ห้ามมั่วหรือเปลี่ยนตัวเลข: ${weatherData}`,
+    { displayName }
+  );
+}
+
+async function answerNewsQuery(displayName) {
+  const news = await getNewsHeadline();
+  if (!news) {
+    return 'นี่เธอ! วันนี้ชาวีหาข่าวไม่เจอเลย เงียบผิดปกติ ลองถามใหม่อีกทีนะ';
+  }
+  const newsData = `หัวข้อข่าว: "${news.title}" (ที่มา: ${news.source})`;
+  return askGroq(
+    `มีคนถามข่าวเด่นตอนนี้ ให้ตอบโดยอ้างอิงข้อมูลจริงนี้เท่านั้น ห้ามมั่วหรือแต่งเนื้อข่าวเพิ่มเติม: ${newsData}`,
+    { displayName }
+  );
+}
+
 async function handleEvent(event) {
   if (event.type !== 'message' || event.message.type !== 'text') {
     return null;
@@ -319,8 +349,10 @@ async function handleEvent(event) {
     return null;
   }
 
+  const intent = triggered ? detectIntent(userText) : null;
+
   let replyText;
-  if (Math.random() < 0.15) {
+  if (!intent && Math.random() < 0.15) {
     replyText = getRandomQuote();
   } else {
     try {
@@ -328,7 +360,14 @@ async function handleEvent(event) {
         getDisplayName(event),
         new Promise((resolve) => setTimeout(() => resolve(null), 800)),
       ]);
-      replyText = await askGroq(userText, { isRandom: !triggered, displayName });
+
+      if (intent === 'weather') {
+        replyText = await answerWeatherQuery(displayName);
+      } else if (intent === 'news') {
+        replyText = await answerNewsQuery(displayName);
+      } else {
+        replyText = await askGroq(userText, { isRandom: !triggered, displayName });
+      }
     } catch (err) {
       console.error('Groq error:', err);
       if (!triggered) return null;
