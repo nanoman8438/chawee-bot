@@ -49,7 +49,6 @@ function isTriggered(text) {
 }
 
 function extractName(event) {
-  const displayName = event.source.userId || event.source.groupId;
   if (event.message.text && event.message.text.length > 0) {
     const match = event.message.text.match(/^([ก-๙a-zA-Z\s]+?)[\s:!?]/);
     if (match && match[1].length < 20) {
@@ -99,16 +98,6 @@ async function sendDailyKnowledge() {
   }
 }
 
-async function sendTypingIndicator(replyToken) {
-  try {
-    await lineClient.sendMessages(replyToken, [
-      { type: 'text', text: '...' },
-    ]);
-  } catch (err) {
-    console.error('Typing indicator error:', err);
-  }
-}
-
 async function askGroq(userText, { isRandom = false } = {}, retries = 3) {
   const userContent = isRandom
     ? `${RANDOM_REPLY_INSTRUCTION}\n\nข้อความที่เพื่อนพิมพ์: "${userText}"`
@@ -150,8 +139,6 @@ async function handleEvent(event) {
     return null;
   }
 
-  await sendTypingIndicator(event.replyToken);
-
   let replyText;
   if (Math.random() < 0.15) {
     replyText = getRandomQuote();
@@ -165,10 +152,25 @@ async function handleEvent(event) {
     }
   }
 
-  return lineClient.replyMessage(event.replyToken, {
-    type: 'text',
-    text: replyText,
-  });
+  try {
+    return await lineClient.replyMessage(event.replyToken, {
+      type: 'text',
+      text: replyText,
+    });
+  } catch (err) {
+    console.error('replyMessage failed, falling back to push:', err.message);
+    const target = event.source.groupId || event.source.roomId || event.source.userId;
+    if (!target) return null;
+    try {
+      return await lineClient.pushMessage(target, {
+        type: 'text',
+        text: replyText,
+      });
+    } catch (pushErr) {
+      console.error('pushMessage fallback also failed:', pushErr.message);
+      return null;
+    }
+  }
 }
 
 app.post('/webhook', (req, res) => {
@@ -207,10 +209,14 @@ function scheduleDailyKnowledge() {
 
   hours.forEach((hour) => {
     const minute = Math.floor(Math.random() * 60);
-    cron.schedule(`${minute} ${hour} * * *`, () => {
-      console.log(`⏰ Sending daily knowledge at ${hour}:${String(minute).padStart(2, '0')}`);
-      sendDailyKnowledge();
-    });
+    cron.schedule(
+      `${minute} ${hour} * * *`,
+      () => {
+        console.log(`⏰ Sending daily knowledge at ${hour}:${String(minute).padStart(2, '0')} (Asia/Bangkok)`);
+        sendDailyKnowledge();
+      },
+      { timezone: 'Asia/Bangkok' }
+    );
   });
 }
 
