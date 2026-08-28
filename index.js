@@ -228,12 +228,12 @@ async function buildKnowledgeMessage() {
   if (Math.random() < 0.4) {
     const fact = await getRandomFactTranslated();
     if (fact) {
-      return `นี่เธอ! ชาวีมาหว่านสาระความรู้หน่อย 🧠\n\n💡 [เกร็ดความรู้]\n${fact}\n\n(ตัวชาวีรู้เรื่องเยอะ ใครไม่หลงตัวชาวี)`;
+      return `📚 สาระความรู้ประจำวัน\n\n💡 ${fact}`;
     }
   }
 
   const { category, emoji, text } = pickRandomKnowledge();
-  return `นี่เธอ! ชาวีมาหว่านสาระความรู้หน่อย 🧠\n\n${emoji} [${category}]\n${text}\n\n(ตัวชาวีรู้เรื่องเยอะ ใครไม่หลงตัวชาวี)`;
+  return `📚 สาระความรู้ประจำวัน\n\n${emoji} [${category}]\n${text}`;
 }
 
 async function sendToAllGroups(message) {
@@ -258,8 +258,8 @@ async function sendToAllGroups(message) {
 async function sendDailyWeather() {
   const weather = await getWeatherReport();
   const message = weather
-    ? `นี่เธอ! ชาวีเช็คอากาศให้แล้ว ☀️\n\n🌡️ กรุงเทพฯ วันนี้ ${weather.temp}°C (รู้สึกเหมือน ${weather.feelsLike}°C)\n☁️ ${weather.description}\n💧 ความชื้น ${weather.humidity}%\n\n(ตัวชาวีใส่ใจขนาดนี้ ใครไม่หลงตัวชาวี)`
-    : 'นี่เธอ! วันนี้ชาวีเช็คอากาศให้ไม่ได้ เน็ตมันดื้อขึ้นมาดื้อๆ เดี๋ยวพรุ่งนี้มาบอกใหม่นะ';
+    ? `🌤️ รายงานสภาพอากาศประจำวัน\n\n📍 กรุงเทพมหานคร\n🌡️ อุณหภูมิ: ${weather.temp}°C (รู้สึกได้ถึง ${weather.feelsLike}°C)\n☁️ สภาพอากาศ: ${weather.description}\n💧 ความชื้น: ${weather.humidity}%`
+    : '🌤️ รายงานสภาพอากาศประจำวัน\n\nขณะนี้ไม่สามารถดึงข้อมูลสภาพอากาศได้ กรุณาตรวจสอบใหม่ภายหลัง';
   console.log(`📢 Sending weather to ${groupIds.size} group(s)...`);
   await sendToAllGroups(message);
 }
@@ -267,8 +267,8 @@ async function sendDailyWeather() {
 async function sendDailyNews() {
   const news = await getNewsHeadline();
   const message = news
-    ? `นี่เธอ! ชาวีมีข่าวมาเล่าให้ฟัง 📰\n\n${news.title}\n(ที่มา: ${news.source})\n\n(ตัวชาวีตามข่าวไวขนาดนี้ ใครไม่หลงตัวชาวี)`
-    : 'นี่เธอ! วันนี้ข่าวเงียบไปหน่อย ไม่มีอะไรน่าสนใจให้เล่าเลย';
+    ? `📰 ข่าวเด่นประจำวัน\n\n${news.title}\n\nที่มา: ${news.source}`
+    : '📰 ข่าวเด่นประจำวัน\n\nขณะนี้ไม่สามารถดึงข้อมูลข่าวได้ กรุณาตรวจสอบใหม่ภายหลัง';
   console.log(`📢 Sending news to ${groupIds.size} group(s)...`);
   await sendToAllGroups(message);
 }
