@@ -22,7 +22,8 @@ const SYSTEM_PROMPT = `เธอคือ "ชาวี อัมราภรณ
 - ใช้สำนวน "นี่เธอ!" "โธ่เอ๊ย!" "เหลวไหล!" "ชื่นมะ!" บ่อยๆ
 - ตอบมีมุก เยาะเย้ย แกล้ง ให้ยิ้ม เสนห์ๆ
 - สั้นกระชับแต่เพ้อ ใจความถูก มีตัวตน
-- ห้ามคำหยาบ ห้ามด่า - ดราม่าต้องสุภาพ ห้ามบอกเป็น AI`;
+- ห้ามคำหยาบ ห้ามด่า - ดราม่าต้องสุภาพ ห้ามบอกเป็น AI
+- ถ้ามีบอกชื่อคนที่พิมพ์มาให้ เรียกชื่อเขาบ้างเป็นบางครั้ง (ไม่ต้องทุกครั้ง จะดูเยอะไป)`;
 
 const RANDOM_REPLY_INSTRUCTION = 'ข้อความนี้ไม่ได้พิมพ์ถึงเธอโดยตรง แต่เธอบังเอิญเห็นเพื่อนในกลุ่มพิมพ์คุยกันแล้วอดไม่ได้ที่จะแทรกความเห็น ให้ตอบสั้นๆ แบบมีส่วนร่วมกับเนื้อหานั้น ไม่ต้องทักทายหรืออธิบายว่าใครพูดอะไร';
 
@@ -35,7 +36,7 @@ const QUOTES = [
   'เสน่ห์นั่นแหละ ทะมึง',
 ];
 
-const userNames = new Set();
+const userProfiles = new Map();
 const groupIds = new Set();
 
 const app = express();
@@ -47,12 +48,29 @@ function isTriggered(text) {
   return /@?ชาวี/.test(text);
 }
 
-function extractName(event) {
-  if (event.message.text && event.message.text.length > 0) {
-    const match = event.message.text.match(/^([ก-๙a-zA-Z\s]+?)[\s:!?]/);
-    if (match && match[1].length < 20) {
-      userNames.add(match[1]);
+async function getDisplayName(event) {
+  const userId = event.source.userId;
+  if (!userId) return null;
+
+  if (userProfiles.has(userId)) {
+    return userProfiles.get(userId);
+  }
+
+  try {
+    let profile;
+    if (event.source.type === 'group') {
+      profile = await lineClient.getGroupMemberProfile(event.source.groupId, userId);
+    } else if (event.source.type === 'room') {
+      profile = await lineClient.getRoomMemberProfile(event.source.roomId, userId);
+    } else {
+      profile = await lineClient.getProfile(userId);
     }
+    userProfiles.set(userId, profile.displayName);
+    return profile.displayName;
+  } catch (err) {
+    console.error('getDisplayName failed:', err.message);
+    userProfiles.set(userId, null);
+    return null;
   }
 }
 
@@ -97,10 +115,11 @@ async function sendDailyKnowledge() {
   }
 }
 
-async function askGroq(userText, { isRandom = false } = {}, retries = 3) {
+async function askGroq(userText, { isRandom = false, displayName = null } = {}, retries = 3) {
+  const namePrefix = displayName ? `[ชื่อคนพิมพ์: ${displayName}]\n` : '';
   const userContent = isRandom
-    ? `${RANDOM_REPLY_INSTRUCTION}\n\nข้อความที่เพื่อนพิมพ์: "${userText}"`
-    : userText;
+    ? `${namePrefix}${RANDOM_REPLY_INSTRUCTION}\n\nข้อความที่เพื่อนพิมพ์: "${userText}"`
+    : `${namePrefix}${userText}`;
 
   const maxTokens = Math.random() < 0.5 ? 300 : 550;
 
@@ -132,18 +151,18 @@ async function handleEvent(event) {
   const userText = event.message.text;
   const triggered = isTriggered(userText);
 
-  extractName(event);
-
   if (!triggered && Math.random() >= RANDOM_REPLY_RATE) {
     return null;
   }
+
+  const displayName = await getDisplayName(event);
 
   let replyText;
   if (Math.random() < 0.15) {
     replyText = getRandomQuote();
   } else {
     try {
-      replyText = await askGroq(userText, { isRandom: !triggered });
+      replyText = await askGroq(userText, { isRandom: !triggered, displayName });
     } catch (err) {
       console.error('Groq error:', err);
       if (!triggered) return null;
