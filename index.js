@@ -120,25 +120,86 @@ function pickRandomKnowledge() {
   return KNOWLEDGE_BASE[Math.floor(Math.random() * KNOWLEDGE_BASE.length)];
 }
 
-async function getWeatherReport() {
+async function getWeatherReport(city = 'Bangkok,TH', daysFromToday = 0) {
   const apiKey = process.env.OPENWEATHER_API_KEY;
   if (!apiKey) return null;
 
   try {
+    if (daysFromToday <= 0) {
+      const res = await fetch(
+        `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${apiKey}&units=metric&lang=th`
+      );
+      if (!res.ok) throw new Error(`OpenWeatherMap HTTP ${res.status}`);
+      const data = await res.json();
+      return {
+        location: data.name || city,
+        temp: Math.round(data.main.temp),
+        feelsLike: Math.round(data.main.feels_like),
+        description: data.weather[0].description,
+        humidity: data.main.humidity,
+        isForecast: false,
+      };
+    }
+
+    // OpenWeatherMap free tier's forecast endpoint only covers 5 days ahead.
     const res = await fetch(
-      `https://api.openweathermap.org/data/2.5/weather?q=Bangkok,TH&appid=${apiKey}&units=metric&lang=th`
+      `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(city)}&appid=${apiKey}&units=metric&lang=th`
     );
     if (!res.ok) throw new Error(`OpenWeatherMap HTTP ${res.status}`);
     const data = await res.json();
+
+    const targetDate = new Date();
+    targetDate.setDate(targetDate.getDate() + daysFromToday);
+    const targetDateStr = targetDate.toISOString().split('T')[0];
+
+    const candidates = (data.list || []).filter((item) => item.dt_txt.startsWith(targetDateStr));
+    if (candidates.length === 0) return null;
+
+    // Prefer the forecast slot closest to midday for a representative reading.
+    const noonEntry =
+      candidates.find((item) => item.dt_txt.endsWith('12:00:00')) || candidates[Math.floor(candidates.length / 2)];
+
     return {
-      temp: Math.round(data.main.temp),
-      feelsLike: Math.round(data.main.feels_like),
-      description: data.weather[0].description,
-      humidity: data.main.humidity,
+      location: data.city?.name || city,
+      temp: Math.round(noonEntry.main.temp),
+      feelsLike: Math.round(noonEntry.main.feels_like),
+      description: noonEntry.weather[0].description,
+      humidity: noonEntry.main.humidity,
+      isForecast: true,
+      forecastDate: targetDateStr,
     };
   } catch (err) {
     console.error('getWeatherReport failed:', err.message);
     return null;
+  }
+}
+
+async function extractWeatherQuery(userText) {
+  try {
+    const res = await groq.chat.completions.create({
+      model: 'openai/gpt-oss-120b',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'แยกข้อมูลจากคำถามเรื่องสภาพอากาศ ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกเหนือจาก JSON รูปแบบ: {"location": "<ชื่อเมือง/ประเทศเป็นภาษาอังกฤษสำหรับค้นหาสภาพอากาศ เช่น Tokyo, Chiang Mai, Paris, หรือ null ถ้าไม่ได้ระบุสถานที่>", "daysFromToday": <0 ถ้าถามวันนี้/ตอนนี้, 1 ถ้าพรุ่งนี้, 2 ถ้ามะรืนนี้ หรือจำนวนวันจากวันนี้ถ้าระบุวันที่อื่น (คำนวณเทียบกับวันนี้), หรือ 0 ถ้าไม่ได้ระบุวัน>}',
+        },
+        { role: 'user', content: userText },
+      ],
+      temperature: 0,
+      max_tokens: 100,
+    });
+    const raw = res.choices[0].message.content.trim();
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { location: null, daysFromToday: 0 };
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      location: typeof parsed.location === 'string' ? parsed.location : null,
+      daysFromToday: typeof parsed.daysFromToday === 'number' ? parsed.daysFromToday : 0,
+    };
+  } catch (err) {
+    console.error('extractWeatherQuery failed:', err.message);
+    return { location: null, daysFromToday: 0 };
   }
 }
 
@@ -346,14 +407,28 @@ function detectIntent(text) {
 
 const LONG_ANSWER_INSTRUCTION = 'สรุปข้อมูลให้ครบถ้วนจบในตัวเอง วางแผนความยาวล่วงหน้าให้พอดีกับเนื้อหา ห้ามตัดข้อความทิ้งกลางคันโดยที่ข้อมูลยังไม่ครบ';
 
-async function answerWeatherQuery(displayName) {
-  const weather = await getWeatherReport();
-  if (!weather) {
-    return 'นี่เธอ! ตอนนี้ชาวีเช็คอากาศให้ไม่ได้ เน็ตมันดื้อขึ้นมาดื้อๆ เดี๋ยวลองถามใหม่อีกทีนะ';
+async function answerWeatherQuery(displayName, userText) {
+  const { location, daysFromToday } = await extractWeatherQuery(userText);
+  const city = location || 'Bangkok,TH';
+  const cityLabel = location || 'กรุงเทพฯ';
+  const days = daysFromToday || 0;
+
+  if (days > 5 || days < 0) {
+    return askGroq(
+      `มีคนถามพยากรณ์อากาศของ ${cityLabel} แต่เป็นวันที่ไกลเกินไป (เกิน 5 วันข้างหน้า หรือเป็นวันในอดีต) ซึ่งชาวีไม่มีข้อมูลระดับนั้น ให้ตอบขอโทษแบบมีเสน่ห์ตามคาแรกเตอร์ พร้อมแนะนำให้ถามพยากรณ์ในช่วง 5 วันข้างหน้าแทน`,
+      { displayName }
+    );
   }
-  const weatherData = `กรุงเทพฯ ตอนนี้ ${weather.temp}°C รู้สึกเหมือน ${weather.feelsLike}°C สภาพอากาศ: ${weather.description} ความชื้น ${weather.humidity}%`;
+
+  const weather = await getWeatherReport(city, days);
+  if (!weather) {
+    return `นี่เธอ! ชาวีหาข้อมูลอากาศของ ${cityLabel} ไม่เจอเลย ลองสะกดชื่อเมืองใหม่อีกทีสิ`;
+  }
+
+  const dayLabel = weather.isForecast ? `พยากรณ์วันที่ ${weather.forecastDate}` : 'ตอนนี้';
+  const weatherData = `${weather.location} (${dayLabel}): ${weather.temp}°C รู้สึกเหมือน ${weather.feelsLike}°C สภาพอากาศ: ${weather.description} ความชื้น ${weather.humidity}%`;
   return askGroq(
-    `มีคนถามสภาพอากาศตอนนี้ ให้ตอบโดยอ้างอิงข้อมูลจริงนี้เท่านั้น ห้ามมั่วหรือเปลี่ยนตัวเลข: ${weatherData}\n\n${LONG_ANSWER_INSTRUCTION}`,
+    `มีคนถามสภาพอากาศ ให้ตอบโดยอ้างอิงข้อมูลจริงนี้เท่านั้น ห้ามมั่วหรือเปลี่ยนตัวเลข: ${weatherData}\n\n${LONG_ANSWER_INSTRUCTION}`,
     { displayName, maxTokens: 1000 }
   );
 }
@@ -406,7 +481,7 @@ async function handleEvent(event) {
       ]);
 
       if (intent === 'weather') {
-        replyText = await answerWeatherQuery(displayName);
+        replyText = await answerWeatherQuery(displayName, userText);
       } else if (intent === 'news') {
         replyText = await answerNewsQuery(displayName, userText);
       } else {
