@@ -142,7 +142,28 @@ async function getWeatherReport() {
   }
 }
 
-async function getNewsHeadline() {
+async function translateToThai(text) {
+  try {
+    const res = await groq.chat.completions.create({
+      model: 'openai/gpt-oss-120b',
+      messages: [
+        {
+          role: 'system',
+          content: 'แปลข้อความภาษาอังกฤษต่อไปนี้เป็นภาษาไทยแบบกระชับ ได้ใจความถูกต้อง ห้ามเติมแต่งหรือใส่ความเห็นเพิ่ม ตอบแค่คำแปลอย่างเดียว ไม่ต้องมีคำนำหรือคำอธิบาย',
+        },
+        { role: 'user', content: text },
+      ],
+      temperature: 0.3,
+      max_tokens: 200,
+    });
+    return res.choices[0].message.content.trim();
+  } catch (err) {
+    console.error('translateToThai failed:', err.message);
+    return null;
+  }
+}
+
+async function getDomesticNews() {
   const apiKey = process.env.NEWSAPI_KEY;
   if (!apiKey) return null;
 
@@ -157,23 +178,57 @@ async function getNewsHeadline() {
     const article = articles[Math.floor(Math.random() * articles.length)];
     return { title: article.title, source: article.source?.name || 'ข่าว' };
   } catch (err) {
-    console.error('getNewsHeadline failed:', err.message);
+    console.error('getDomesticNews failed:', err.message);
     return null;
   }
 }
 
-async function buildDailyMessage() {
-  const roll = Math.random();
+async function getInternationalNewsTranslated() {
+  const apiKey = process.env.NEWSAPI_KEY;
+  if (!apiKey) return null;
 
-  if (roll < 0.3) {
-    const weather = await getWeatherReport();
-    if (weather) {
-      return `นี่เธอ! ชาวีเช็คอากาศให้แล้ว ☀️\n\n🌡️ กรุงเทพฯ วันนี้ ${weather.temp}°C (รู้สึกเหมือน ${weather.feelsLike}°C)\n☁️ ${weather.description}\n💧 ความชื้น ${weather.humidity}%\n\n(ตัวชาวีใส่ใจขนาดนี้ ใครไม่หลงตัวชาวี)`;
-    }
-  } else if (roll < 0.6) {
-    const news = await getNewsHeadline();
-    if (news) {
-      return `นี่เธอ! ชาวีมีข่าวมาเล่าให้ฟัง 📰\n\n${news.title}\n(ที่มา: ${news.source})\n\n(ตัวชาวีตามข่าวไวขนาดนี้ ใครไม่หลงตัวชาวี)`;
+  try {
+    const res = await fetch(
+      `https://newsapi.org/v2/top-headlines?language=en&category=general&pageSize=10&apiKey=${apiKey}`
+    );
+    if (!res.ok) throw new Error(`NewsAPI HTTP ${res.status}`);
+    const data = await res.json();
+    const articles = (data.articles || []).filter((a) => a.title && a.title !== '[Removed]');
+    if (articles.length === 0) return null;
+    const article = articles[Math.floor(Math.random() * articles.length)];
+    const translatedTitle = await translateToThai(article.title);
+    if (!translatedTitle) return null;
+    return { title: translatedTitle, source: article.source?.name || 'ต่างประเทศ' };
+  } catch (err) {
+    console.error('getInternationalNewsTranslated failed:', err.message);
+    return null;
+  }
+}
+
+async function getNewsHeadline() {
+  const useInternational = Math.random() < 0.5;
+  const primary = useInternational ? getInternationalNewsTranslated : getDomesticNews;
+  const fallback = useInternational ? getDomesticNews : getInternationalNewsTranslated;
+  return (await primary()) || (await fallback());
+}
+
+async function getRandomFactTranslated() {
+  try {
+    const res = await fetch('https://uselessfacts.jsph.pl/api/v2/facts/random?language=en');
+    if (!res.ok) throw new Error(`uselessfacts HTTP ${res.status}`);
+    const data = await res.json();
+    return await translateToThai(data.text);
+  } catch (err) {
+    console.error('getRandomFactTranslated failed:', err.message);
+    return null;
+  }
+}
+
+async function buildKnowledgeMessage() {
+  if (Math.random() < 0.4) {
+    const fact = await getRandomFactTranslated();
+    if (fact) {
+      return `นี่เธอ! ชาวีมาหว่านสาระความรู้หน่อย 🧠\n\n💡 [เกร็ดความรู้]\n${fact}\n\n(ตัวชาวีรู้เรื่องเยอะ ใครไม่หลงตัวชาวี)`;
     }
   }
 
@@ -181,15 +236,11 @@ async function buildDailyMessage() {
   return `นี่เธอ! ชาวีมาหว่านสาระความรู้หน่อย 🧠\n\n${emoji} [${category}]\n${text}\n\n(ตัวชาวีรู้เรื่องเยอะ ใครไม่หลงตัวชาวี)`;
 }
 
-async function sendDailyKnowledge() {
+async function sendToAllGroups(message) {
   if (groupIds.size === 0) {
-    console.log('No groups to send knowledge');
+    console.log('No groups to send message to');
     return;
   }
-
-  const message = await buildDailyMessage();
-
-  console.log(`📢 Sending knowledge to ${groupIds.size} group(s)...`);
 
   for (const groupId of groupIds) {
     try {
@@ -202,6 +253,30 @@ async function sendDailyKnowledge() {
       console.error(`❌ Failed to send to ${groupId}:`, err.message);
     }
   }
+}
+
+async function sendDailyWeather() {
+  const weather = await getWeatherReport();
+  const message = weather
+    ? `นี่เธอ! ชาวีเช็คอากาศให้แล้ว ☀️\n\n🌡️ กรุงเทพฯ วันนี้ ${weather.temp}°C (รู้สึกเหมือน ${weather.feelsLike}°C)\n☁️ ${weather.description}\n💧 ความชื้น ${weather.humidity}%\n\n(ตัวชาวีใส่ใจขนาดนี้ ใครไม่หลงตัวชาวี)`
+    : 'นี่เธอ! วันนี้ชาวีเช็คอากาศให้ไม่ได้ เน็ตมันดื้อขึ้นมาดื้อๆ เดี๋ยวพรุ่งนี้มาบอกใหม่นะ';
+  console.log(`📢 Sending weather to ${groupIds.size} group(s)...`);
+  await sendToAllGroups(message);
+}
+
+async function sendDailyNews() {
+  const news = await getNewsHeadline();
+  const message = news
+    ? `นี่เธอ! ชาวีมีข่าวมาเล่าให้ฟัง 📰\n\n${news.title}\n(ที่มา: ${news.source})\n\n(ตัวชาวีตามข่าวไวขนาดนี้ ใครไม่หลงตัวชาวี)`
+    : 'นี่เธอ! วันนี้ข่าวเงียบไปหน่อย ไม่มีอะไรน่าสนใจให้เล่าเลย';
+  console.log(`📢 Sending news to ${groupIds.size} group(s)...`);
+  await sendToAllGroups(message);
+}
+
+async function sendDailyKnowledge() {
+  const message = await buildKnowledgeMessage();
+  console.log(`📢 Sending knowledge to ${groupIds.size} group(s)...`);
+  await sendToAllGroups(message);
 }
 
 async function askGroq(userText, { isRandom = false, displayName = null } = {}, retries = 3) {
@@ -311,29 +386,46 @@ app.get('/', (req, res) => {
   res.send('Chawee LINE bot is running.');
 });
 
-// Schedule daily knowledge: exactly ONE random time between 8:00-17:00 per day.
-function scheduleOneRandomKnowledgeSend() {
-  const hour = 8 + Math.floor(Math.random() * 10); // 8-17 inclusive
-  const minute = Math.floor(Math.random() * 60);
+// Fires `sendFn` exactly once per day at a random time within [startHour, endHour],
+// re-picking a fresh random time every midnight.
+function scheduleRandomDailyTask(label, startHour, endHour, sendFn) {
+  function scheduleToday() {
+    const hour = startHour + Math.floor(Math.random() * (endHour - startHour + 1));
+    const minute = Math.floor(Math.random() * 60);
 
-  console.log(`📅 Today's knowledge send time: ${hour}:${String(minute).padStart(2, '0')} (Asia/Bangkok)`);
+    console.log(`📅 ${label} scheduled today at ${hour}:${String(minute).padStart(2, '0')} (Asia/Bangkok)`);
 
-  const task = cron.schedule(
-    `${minute} ${hour} * * *`,
+    const task = cron.schedule(
+      `${minute} ${hour} * * *`,
+      () => {
+        console.log(`⏰ Running ${label} at ${hour}:${String(minute).padStart(2, '0')} (Asia/Bangkok)`);
+        sendFn();
+        task.stop(); // fire once only; tomorrow's time is picked fresh at midnight
+      },
+      { timezone: 'Asia/Bangkok' }
+    );
+  }
+
+  scheduleToday(); // pick today's time right away
+  cron.schedule('0 0 * * *', scheduleToday, { timezone: 'Asia/Bangkok' }); // re-pick every midnight
+}
+
+function scheduleDailyContent() {
+  // Weather: fixed every day at 8:00
+  cron.schedule(
+    '0 8 * * *',
     () => {
-      console.log(`⏰ Sending daily knowledge at ${hour}:${String(minute).padStart(2, '0')} (Asia/Bangkok)`);
-      sendDailyKnowledge();
-      task.stop(); // fire once only; tomorrow's time is picked fresh at midnight
+      console.log('⏰ Sending daily weather at 8:00 (Asia/Bangkok)');
+      sendDailyWeather();
     },
     { timezone: 'Asia/Bangkok' }
   );
-}
 
-function scheduleDailyKnowledge() {
-  scheduleOneRandomKnowledgeSend(); // pick today's time right away
+  // News: random time between 8:00-17:00, picked fresh each day
+  scheduleRandomDailyTask('daily news', 8, 17, sendDailyNews);
 
-  // Pick a fresh random time for the next day, every midnight.
-  cron.schedule('0 0 * * *', scheduleOneRandomKnowledgeSend, { timezone: 'Asia/Bangkok' });
+  // Knowledge: random time between 8:00-17:00, picked fresh each day (independent of news)
+  scheduleRandomDailyTask('daily knowledge', 8, 17, sendDailyKnowledge);
 }
 
 // Render free tier spins the service down after ~15 min of no traffic,
@@ -355,7 +447,7 @@ function startKeepAlive() {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Chawee bot listening on port ${PORT}`);
-  scheduleDailyKnowledge();
+  scheduleDailyContent();
   startKeepAlive();
-  console.log('Daily knowledge scheduler started (8:00-17:00)');
+  console.log('Daily content scheduler started (weather 8:00, news + knowledge random 8:00-17:00)');
 });
