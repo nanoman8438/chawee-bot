@@ -212,6 +212,37 @@ async function getNewsHeadline() {
   return (await primary()) || (await fallback());
 }
 
+function extractNewsQuery(text) {
+  const cleaned = text
+    .replace(/@?ชาวี/g, '')
+    .replace(/ข่าว(เด่น|ล่าสุด|วันนี้)?|news|บอก(หน่อย)?|มี(อะไร)?บ้าง?|เป็นไง|เป็นยังไง|หน่อย|ไหม|ด้วย/gi, '')
+    .trim();
+  return cleaned.length >= 2 ? cleaned : null;
+}
+
+async function searchNews(query) {
+  const apiKey = process.env.NEWSAPI_KEY;
+  if (!apiKey || !query) return null;
+
+  try {
+    const res = await fetch(
+      `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=th&sortBy=relevancy&pageSize=5&apiKey=${apiKey}`
+    );
+    if (!res.ok) throw new Error(`NewsAPI HTTP ${res.status}`);
+    const data = await res.json();
+    const articles = (data.articles || []).filter((a) => a.title && a.title !== '[Removed]');
+    if (articles.length === 0) return null;
+    return articles.slice(0, 3).map((a) => ({
+      title: a.title,
+      description: a.description || '',
+      source: a.source?.name || 'ข่าว',
+    }));
+  } catch (err) {
+    console.error('searchNews failed:', err.message);
+    return null;
+  }
+}
+
 async function getRandomFactTranslated() {
   try {
     const res = await fetch('https://uselessfacts.jsph.pl/api/v2/facts/random?language=en');
@@ -279,13 +310,13 @@ async function sendDailyKnowledge() {
   await sendToAllGroups(message);
 }
 
-async function askGroq(userText, { isRandom = false, displayName = null } = {}, retries = 3) {
+async function askGroq(userText, { isRandom = false, displayName = null, maxTokens: maxTokensOverride = null } = {}, retries = 3) {
   const namePrefix = displayName ? `[ชื่อคนพิมพ์: ${displayName}]\n` : '';
   const userContent = isRandom
     ? `${namePrefix}${RANDOM_REPLY_INSTRUCTION}\n\nข้อความที่เพื่อนพิมพ์: "${userText}"`
     : `${namePrefix}${userText}`;
 
-  const maxTokens = Math.random() < 0.5 ? 300 : 550;
+  const maxTokens = maxTokensOverride ?? (Math.random() < 0.5 ? 300 : 550);
 
   for (let i = 0; i < retries; i++) {
     try {
@@ -313,6 +344,8 @@ function detectIntent(text) {
   return null;
 }
 
+const LONG_ANSWER_INSTRUCTION = 'สรุปข้อมูลให้ครบถ้วนจบในตัวเอง วางแผนความยาวล่วงหน้าให้พอดีกับเนื้อหา ห้ามตัดข้อความทิ้งกลางคันโดยที่ข้อมูลยังไม่ครบ';
+
 async function answerWeatherQuery(displayName) {
   const weather = await getWeatherReport();
   if (!weather) {
@@ -320,20 +353,31 @@ async function answerWeatherQuery(displayName) {
   }
   const weatherData = `กรุงเทพฯ ตอนนี้ ${weather.temp}°C รู้สึกเหมือน ${weather.feelsLike}°C สภาพอากาศ: ${weather.description} ความชื้น ${weather.humidity}%`;
   return askGroq(
-    `มีคนถามสภาพอากาศตอนนี้ ให้ตอบโดยอ้างอิงข้อมูลจริงนี้เท่านั้น ห้ามมั่วหรือเปลี่ยนตัวเลข: ${weatherData}`,
-    { displayName }
+    `มีคนถามสภาพอากาศตอนนี้ ให้ตอบโดยอ้างอิงข้อมูลจริงนี้เท่านั้น ห้ามมั่วหรือเปลี่ยนตัวเลข: ${weatherData}\n\n${LONG_ANSWER_INSTRUCTION}`,
+    { displayName, maxTokens: 1000 }
   );
 }
 
-async function answerNewsQuery(displayName) {
-  const news = await getNewsHeadline();
-  if (!news) {
-    return 'นี่เธอ! วันนี้ชาวีหาข่าวไม่เจอเลย เงียบผิดปกติ ลองถามใหม่อีกทีนะ';
+async function answerNewsQuery(displayName, userText) {
+  const query = extractNewsQuery(userText);
+  const searchResults = query ? await searchNews(query) : null;
+
+  let newsData;
+  if (searchResults && searchResults.length > 0) {
+    newsData = searchResults
+      .map((n, i) => `${i + 1}. ${n.title}${n.description ? ' - ' + n.description : ''} (ที่มา: ${n.source})`)
+      .join('\n');
+  } else {
+    const news = await getNewsHeadline();
+    if (!news) {
+      return 'นี่เธอ! วันนี้ชาวีหาข่าวไม่เจอเลย เงียบผิดปกติ ลองถามใหม่อีกทีนะ';
+    }
+    newsData = `หัวข้อข่าว: "${news.title}" (ที่มา: ${news.source})`;
   }
-  const newsData = `หัวข้อข่าว: "${news.title}" (ที่มา: ${news.source})`;
+
   return askGroq(
-    `มีคนถามข่าวเด่นตอนนี้ ให้ตอบโดยอ้างอิงข้อมูลจริงนี้เท่านั้น ห้ามมั่วหรือแต่งเนื้อข่าวเพิ่มเติม: ${newsData}`,
-    { displayName }
+    `มีคนถามข่าว ให้ตอบโดยอ้างอิงข้อมูลจริงต่อไปนี้เท่านั้น ห้ามมั่วหรือแต่งเนื้อข่าวเพิ่มเติม:\n${newsData}\n\n${LONG_ANSWER_INSTRUCTION}`,
+    { displayName, maxTokens: 1000 }
   );
 }
 
@@ -364,7 +408,7 @@ async function handleEvent(event) {
       if (intent === 'weather') {
         replyText = await answerWeatherQuery(displayName);
       } else if (intent === 'news') {
-        replyText = await answerNewsQuery(displayName);
+        replyText = await answerNewsQuery(displayName, userText);
       } else {
         replyText = await askGroq(userText, { isRandom: !triggered, displayName });
       }
