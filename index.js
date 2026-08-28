@@ -120,14 +120,74 @@ function pickRandomKnowledge() {
   return KNOWLEDGE_BASE[Math.floor(Math.random() * KNOWLEDGE_BASE.length)];
 }
 
+async function getWeatherReport() {
+  const apiKey = process.env.OPENWEATHER_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const res = await fetch(
+      `https://api.openweathermap.org/data/2.5/weather?q=Bangkok,TH&appid=${apiKey}&units=metric&lang=th`
+    );
+    if (!res.ok) throw new Error(`OpenWeatherMap HTTP ${res.status}`);
+    const data = await res.json();
+    return {
+      temp: Math.round(data.main.temp),
+      feelsLike: Math.round(data.main.feels_like),
+      description: data.weather[0].description,
+      humidity: data.main.humidity,
+    };
+  } catch (err) {
+    console.error('getWeatherReport failed:', err.message);
+    return null;
+  }
+}
+
+async function getNewsHeadline() {
+  const apiKey = process.env.NEWSAPI_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const res = await fetch(
+      `https://newsapi.org/v2/top-headlines?country=th&pageSize=10&apiKey=${apiKey}`
+    );
+    if (!res.ok) throw new Error(`NewsAPI HTTP ${res.status}`);
+    const data = await res.json();
+    const articles = (data.articles || []).filter((a) => a.title && a.title !== '[Removed]');
+    if (articles.length === 0) return null;
+    const article = articles[Math.floor(Math.random() * articles.length)];
+    return { title: article.title, source: article.source?.name || 'ข่าว' };
+  } catch (err) {
+    console.error('getNewsHeadline failed:', err.message);
+    return null;
+  }
+}
+
+async function buildDailyMessage() {
+  const roll = Math.random();
+
+  if (roll < 0.3) {
+    const weather = await getWeatherReport();
+    if (weather) {
+      return `นี่เธอ! ชาวีเช็คอากาศให้แล้ว ☀️\n\n🌡️ กรุงเทพฯ วันนี้ ${weather.temp}°C (รู้สึกเหมือน ${weather.feelsLike}°C)\n☁️ ${weather.description}\n💧 ความชื้น ${weather.humidity}%\n\n(ตัวชาวีใส่ใจขนาดนี้ ใครไม่หลงตัวชาวี)`;
+    }
+  } else if (roll < 0.6) {
+    const news = await getNewsHeadline();
+    if (news) {
+      return `นี่เธอ! ชาวีมีข่าวมาเล่าให้ฟัง 📰\n\n${news.title}\n(ที่มา: ${news.source})\n\n(ตัวชาวีตามข่าวไวขนาดนี้ ใครไม่หลงตัวชาวี)`;
+    }
+  }
+
+  const { category, emoji, text } = pickRandomKnowledge();
+  return `นี่เธอ! ชาวีมาหว่านสาระความรู้หน่อย 🧠\n\n${emoji} [${category}]\n${text}\n\n(ตัวชาวีรู้เรื่องเยอะ ใครไม่หลงตัวชาวี)`;
+}
+
 async function sendDailyKnowledge() {
   if (groupIds.size === 0) {
     console.log('No groups to send knowledge');
     return;
   }
 
-  const { category, emoji, text } = pickRandomKnowledge();
-  const message = `นี่เธอ! ชาวีมาหว่านสาระความรู้หน่อย 🧠\n\n${emoji} [${category}]\n${text}\n\n(ตัวชาวีรู้เรื่องเยอะ ใครไม่หลงตัวชาวี)`;
+  const message = await buildDailyMessage();
 
   console.log(`📢 Sending knowledge to ${groupIds.size} group(s)...`);
 
