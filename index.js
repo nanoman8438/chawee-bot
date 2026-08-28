@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+const https = require('https');
 const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
 const Groq = require('groq-sdk');
@@ -156,13 +157,15 @@ async function handleEvent(event) {
     return null;
   }
 
-  const displayName = await getDisplayName(event);
-
   let replyText;
   if (Math.random() < 0.15) {
     replyText = getRandomQuote();
   } else {
     try {
+      const displayName = await Promise.race([
+        getDisplayName(event),
+        new Promise((resolve) => setTimeout(() => resolve(null), 800)),
+      ]);
       replyText = await askGroq(userText, { isRandom: !triggered, displayName });
     } catch (err) {
       console.error('Groq error:', err);
@@ -193,11 +196,13 @@ async function handleEvent(event) {
 }
 
 app.post('/webhook', middleware(lineConfig), (req, res) => {
-  console.log('Webhook received:', JSON.stringify(req.body, null, 2));
+  // Acknowledge LINE immediately so it never times out waiting on Groq/API
+  // calls; the rest of the work happens after the response is sent.
+  res.status(200).end();
 
   if (!req.body.events || req.body.events.length === 0) {
     console.log('No events in webhook');
-    return res.status(200).end();
+    return;
   }
 
   req.body.events.forEach((event) => {
@@ -210,12 +215,9 @@ app.post('/webhook', middleware(lineConfig), (req, res) => {
     }
   });
 
-  Promise.all(req.body.events.map(handleEvent))
-    .then(() => res.status(200).end())
-    .catch((err) => {
-      console.error('Webhook error:', err);
-      res.status(500).end();
-    });
+  Promise.all(req.body.events.map(handleEvent)).catch((err) => {
+    console.error('Webhook processing error:', err);
+  });
 });
 
 app.get('/', (req, res) => {
@@ -239,9 +241,26 @@ function scheduleDailyKnowledge() {
   });
 }
 
+// Render free tier spins the service down after ~15 min of no traffic,
+// causing a slow cold-start that can miss the first message after idle.
+// Pinging ourselves keeps the instance awake.
+function startKeepAlive() {
+  const selfUrl = process.env.RENDER_EXTERNAL_URL;
+  if (!selfUrl) return;
+
+  setInterval(() => {
+    https.get(selfUrl, (res) => {
+      console.log(`🏓 Keep-alive ping: ${res.statusCode}`);
+    }).on('error', (err) => {
+      console.error('Keep-alive ping failed:', err.message);
+    });
+  }, 10 * 60 * 1000);
+}
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Chawee bot listening on port ${PORT}`);
   scheduleDailyKnowledge();
+  startKeepAlive();
   console.log('Daily knowledge scheduler started (8:00-17:00)');
 });
