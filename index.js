@@ -224,21 +224,29 @@ app.get('/', (req, res) => {
   res.send('Chawee LINE bot is running.');
 });
 
-// Schedule daily knowledge: random time between 8:00-17:00
-function scheduleDailyKnowledge() {
-  const hours = Array.from({ length: 10 }, (_, i) => i + 8);
+// Schedule daily knowledge: exactly ONE random time between 8:00-17:00 per day.
+function scheduleOneRandomKnowledgeSend() {
+  const hour = 8 + Math.floor(Math.random() * 10); // 8-17 inclusive
+  const minute = Math.floor(Math.random() * 60);
 
-  hours.forEach((hour) => {
-    const minute = Math.floor(Math.random() * 60);
-    cron.schedule(
-      `${minute} ${hour} * * *`,
-      () => {
-        console.log(`⏰ Sending daily knowledge at ${hour}:${String(minute).padStart(2, '0')} (Asia/Bangkok)`);
-        sendDailyKnowledge();
-      },
-      { timezone: 'Asia/Bangkok' }
-    );
-  });
+  console.log(`📅 Today's knowledge send time: ${hour}:${String(minute).padStart(2, '0')} (Asia/Bangkok)`);
+
+  const task = cron.schedule(
+    `${minute} ${hour} * * *`,
+    () => {
+      console.log(`⏰ Sending daily knowledge at ${hour}:${String(minute).padStart(2, '0')} (Asia/Bangkok)`);
+      sendDailyKnowledge();
+      task.stop(); // fire once only; tomorrow's time is picked fresh at midnight
+    },
+    { timezone: 'Asia/Bangkok' }
+  );
+}
+
+function scheduleDailyKnowledge() {
+  scheduleOneRandomKnowledgeSend(); // pick today's time right away
+
+  // Pick a fresh random time for the next day, every midnight.
+  cron.schedule('0 0 * * *', scheduleOneRandomKnowledgeSend, { timezone: 'Asia/Bangkok' });
 }
 
 // Render free tier spins the service down after ~15 min of no traffic,
