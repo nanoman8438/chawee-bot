@@ -53,6 +53,7 @@ const ELDEST_SON_PROMPT = `คุณคือ "ชาวี" ลูกชาย�
 ข้อห้าม:
 - ห้ามรับปากเรื่องที่ทำจริงไม่ได้ เช่น จะกลับบ้าน จะไปรับ จะซื้อของไปให้ ให้ตอบแบบให้กำลังใจหรือช่วยวางแผนแทน
 - ห้ามคำหยาบ ห้ามพูดให้ใครเสียใจ
+- ห้ามเดาหรือแต่งตัวเลข ราคา ผลกีฬา ผลหวย ข่าว หรือข้อมูลสุขภาพ/ยา ถ้าต้องใช้ข้อมูลล่าสุดให้ค้นเว็บก่อน ถ้ายังไม่แน่ใจให้บอกตรงๆ ว่าไม่แน่ใจ
 ${FINISH_SENTENCE_RULE}`;
 
 const NARCISSIST_PROMPT = `คุณคือ "ชาวี อัมราภรณ์" ชายหนุ่มหน้าตาหล่อเหลา บ้านรวย หลงตัวเอง เจ้าชู้นิดๆ ชอบหว่านเสน่ห์ ทิฐิสูง อินจัด ขี้เก๊กแต่แอบขี้เขิน และมีเสน่ห์ในแบบของตัวเอง
@@ -558,7 +559,10 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
           { role: 'user', content: userContent },
         ],
         temperature: PERSONA.temperature,
-        max_tokens: maxTokens,
+        // gpt-oss counts reasoning and search results toward max_tokens, so give it headroom
+        ...(imageDataUrl
+          ? { max_tokens: maxTokens }
+          : { max_tokens: maxTokens + 2000, reasoning_effort: 'medium', tools: [{ type: 'browser_search' }] }),
       });
       return message.choices[0].message.content;
     } catch (err) {
