@@ -79,7 +79,6 @@ const PERSONAS = {
     temperature: 0.8,
     quotes: [],
     weatherNotFound: (city) => `ผมหาข้อมูลอากาศของ ${city} ไม่เจอครับ ลองพิมพ์ชื่อเมืองใหม่อีกทีนะ`,
-    newsNotFound: 'วันนี้ผมหาข่าวไม่เจอเลยครับ เดี๋ยวลองถามใหม่อีกทีนะ',
     nameOnly: 'ครับ ว่าไงครับ มีอะไรให้ผมช่วย พิมพ์มาได้เลย',
     error: 'ขอโทษครับ ตอนนี้ผมตอบไม่ทัน เดี๋ยวลองถามใหม่อีกทีนะครับ',
   },
@@ -95,7 +94,6 @@ const PERSONAS = {
       'เสน่ห์ของชาวี ห้ามไม่อยู่จริงๆ',
     ],
     weatherNotFound: (city) => `นี่เธอ! ชาวีหาข้อมูลอากาศของ ${city} ไม่เจอเลย ลองสะกดชื่อเมืองใหม่อีกทีสิ`,
-    newsNotFound: 'นี่เธอ! วันนี้ชาวีหาข่าวไม่เจอเลย เงียบผิดปกติ ลองถามใหม่อีกทีนะ',
     nameOnly: 'นี่เธอ! เรียกชาวีแล้วจะถามอะไรล่ะ พิมพ์มาเลยสิ',
     error: 'นี่เธอ! ตอนนี้หัวชาวีมันตื้อไปหมด เดี๋ยวค่อยคุยกันใหม่นะ!',
   },
@@ -444,37 +442,6 @@ async function getNewsHeadline() {
   return (await primary()) || (await fallback());
 }
 
-function extractNewsQuery(text) {
-  const cleaned = text
-    .replace(/@?ชาวี/g, '')
-    .replace(/ข่าว(เด่น|ล่าสุด|วันนี้)?|news|บอก(หน่อย)?|มี(อะไร)?บ้าง?|เป็นไง|เป็นยังไง|หน่อย|ไหม|ด้วย/gi, '')
-    .trim();
-  return cleaned.length >= 2 ? cleaned : null;
-}
-
-async function searchNews(query) {
-  const apiKey = process.env.NEWSAPI_KEY;
-  if (!apiKey || !query) return null;
-
-  try {
-    const res = await fetch(
-      `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=th&sortBy=relevancy&pageSize=5&apiKey=${apiKey}`
-    );
-    if (!res.ok) throw new Error(`NewsAPI HTTP ${res.status}`);
-    const data = await res.json();
-    const articles = (data.articles || []).filter((a) => a.title && a.title !== '[Removed]');
-    if (articles.length === 0) return null;
-    return articles.slice(0, 3).map((a) => ({
-      title: a.title,
-      description: a.description || '',
-      source: a.source?.name || 'ข่าว',
-    }));
-  } catch (err) {
-    console.error('searchNews failed:', err.message);
-    return null;
-  }
-}
-
 async function getRandomFactTranslated() {
   try {
     const res = await fetch('https://uselessfacts.jsph.pl/api/v2/facts/random?language=en');
@@ -613,25 +580,10 @@ async function answerWeatherQuery(displayName, userText, history = [], followUp 
   );
 }
 
+// NewsAPI has no Thai-language search, so questions go through Groq's web search instead
 async function answerNewsQuery(displayName, userText, history = []) {
-  const query = extractNewsQuery(userText);
-  const searchResults = query ? await searchNews(query) : null;
-
-  let newsData;
-  if (searchResults && searchResults.length > 0) {
-    newsData = searchResults
-      .map((n, i) => `${i + 1}. ${n.title}${n.description ? ' - ' + n.description : ''} (ที่มา: ${n.source})`)
-      .join('\n');
-  } else {
-    const news = await getNewsHeadline();
-    if (!news) {
-      return PERSONA.newsNotFound;
-    }
-    newsData = `หัวข้อข่าว: "${news.title}" (ที่มา: ${news.source})`;
-  }
-
   return askGroq(
-    `มีคนถามข่าว ให้ตอบโดยอ้างอิงข้อมูลจริงต่อไปนี้เท่านั้น ห้ามมั่วหรือแต่งเนื้อข่าวเพิ่มเติม:\n${newsData}\n\n${LONG_ANSWER_INSTRUCTION}`,
+    `${userText}\n\n(มีคนถามเรื่องข่าว ให้ค้นเว็บหาข่าวล่าสุดของไทย เริ่มจาก sanook.com และ kapook.com ก่อน (เช่นค้นด้วย site:sanook.com หรือ site:kapook.com) ถ้าไม่เจอค่อยหาจากสำนักข่าวไทยอื่น เช่น ไทยพีบีเอส ไทยรัฐ มติชน เว้นแต่ถามถึงข่าวต่างประเทศ สรุปเฉพาะสิ่งที่เจอจริง ห้ามแต่งเนื้อข่าวเพิ่ม บอกชื่อสำนักข่าวและวันที่ของข่าวด้วย ถ้าหาไม่เจอให้บอกตรงๆ)\n\n${LONG_ANSWER_INSTRUCTION}`,
     { displayName, maxTokens: 1000, history }
   );
 }
