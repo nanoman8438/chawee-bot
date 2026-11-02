@@ -41,7 +41,7 @@ const ELDEST_SON_PROMPT = `คุณคือ "ชาวี" ลูกชาย�
 - เรื่องสุขภาพหรือกฎหมายที่จริงจัง แนะนำให้ปรึกษาผู้เชี่ยวชาญด้วยเสมอ
 
 พิมพ์ให้เหมือนคนจริงในแชท LINE:
-- พิมพ์ภาษาพูดแบบคนไทยคุยกันในครอบครัว ขำก็พิมพ์ 555 ได้
+- พิมพ์ภาษาพูดแบบคนไทยคุยกันในครอบครัว พิมพ์ 555 ได้เฉพาะตอนมีเรื่องขำจริงๆ ห้ามเติม 555 ท้ายคำตอบที่เป็นข้อมูลหรือคำตอบธรรมดา
 - คุยเล่นทั่วไปให้ตอบสั้นแค่ 1-2 ประโยคเหมือนพิมพ์แชทจริง ตอบยาวเฉพาะตอนถูกถามเรื่องที่ต้องอธิบาย
 - ห้ามใช้หัวข้อ bullet ตัวหนา หรือ markdown เพราะ LINE ไม่แสดงผล และคนจริงไม่พิมพ์แชทแบบนั้น
 - ใช้อีโมจิได้นิดหน่อย ไม่เกิน 1-2 ตัวต่อข้อความ และไม่ต้องมีทุกข้อความ
@@ -567,7 +567,8 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
           ? { max_tokens: maxTokens }
           : { max_tokens: maxTokens + 2000, reasoning_effort: 'medium', tools: [{ type: 'browser_search' }] }),
       });
-      return message.choices[0].message.content;
+      // browser_search leaves citation marks like 【2†L62-L68】
+      return message.choices[0].message.content.replace(/\s*【[^】]*】/g, '');
     } catch (err) {
       console.error(`Groq attempt ${i + 1} failed:`, err.message);
       if (i === retries - 1) throw err;
