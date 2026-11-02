@@ -413,35 +413,6 @@ async function getDomesticNews() {
   }
 }
 
-async function getInternationalNewsTranslated() {
-  const apiKey = process.env.NEWSAPI_KEY;
-  if (!apiKey) return null;
-
-  try {
-    const res = await fetch(
-      `https://newsapi.org/v2/top-headlines?language=en&category=general&pageSize=10&apiKey=${apiKey}`
-    );
-    if (!res.ok) throw new Error(`NewsAPI HTTP ${res.status}`);
-    const data = await res.json();
-    const articles = (data.articles || []).filter((a) => a.title && a.title !== '[Removed]');
-    if (articles.length === 0) return null;
-    const article = articles[Math.floor(Math.random() * articles.length)];
-    const translatedTitle = await translateToThai(article.title);
-    if (!translatedTitle) return null;
-    return { title: translatedTitle, source: article.source?.name || 'ต่างประเทศ' };
-  } catch (err) {
-    console.error('getInternationalNewsTranslated failed:', err.message);
-    return null;
-  }
-}
-
-async function getNewsHeadline() {
-  const useInternational = Math.random() < 0.5;
-  const primary = useInternational ? getInternationalNewsTranslated : getDomesticNews;
-  const fallback = useInternational ? getDomesticNews : getInternationalNewsTranslated;
-  return (await primary()) || (await fallback());
-}
-
 async function getRandomFactTranslated() {
   try {
     const res = await fetch('https://uselessfacts.jsph.pl/api/v2/facts/random?language=en');
@@ -494,11 +465,28 @@ async function sendDailyWeather() {
   await sendToAllGroups(message);
 }
 
+// Thai outlets only: foreign news counts only once Thai media has picked it up
+async function getThaiTopNews() {
+  try {
+    const text = await askGroq(
+      `ค้นเว็บข่าวไทย (เช่น ไทยรัฐ ไทยพีบีเอส มติชน ข่าวสด sanook kapook) แล้วสรุปข่าวเด่นของวันนี้ 3 เรื่อง ใช้เฉพาะข่าวที่สื่อไทยรายงาน ข่าวต่างประเทศเอาได้เฉพาะที่สื่อไทยนำมารายงาน ห้ามแต่งข่าวเอง แต่ละเรื่องให้มีหัวข่าวสั้นๆ สรุป 1-2 บรรทัด และ (ที่มา: ชื่อสำนักข่าว) ตอบเฉพาะรายการข่าว ไม่ต้องทักทาย ถ้าหาข่าวไม่เจอให้ตอบคำว่า NONE คำเดียว`,
+      { maxTokens: 1200 }
+    );
+    return text && !text.includes('NONE') ? text.trim() : null;
+  } catch (err) {
+    console.error('getThaiTopNews failed:', err.message);
+    return null;
+  }
+}
+
 async function sendDailyNews() {
-  const news = await getNewsHeadline();
-  const message = news
-    ? `📰 ข่าวเด่นประจำวัน\n\n${news.title}\n\nที่มา: ${news.source}`
-    : '📰 ข่าวเด่นประจำวัน\n\nขณะนี้ไม่สามารถดึงข้อมูลข่าวได้ กรุณาตรวจสอบใหม่ภายหลัง';
+  const summary = await getThaiTopNews();
+  const fallback = summary ? null : await getDomesticNews();
+  const message = summary
+    ? `📰 ข่าวเด่นประจำวัน\n\n${summary}`
+    : fallback
+      ? `📰 ข่าวเด่นประจำวัน\n\n${fallback.title}\n\nที่มา: ${fallback.source}`
+      : '📰 ข่าวเด่นประจำวัน\n\nขณะนี้ไม่สามารถดึงข้อมูลข่าวได้ กรุณาตรวจสอบใหม่ภายหลัง';
   console.log(`📢 Sending news to ${groupIds.size} group(s)...`);
   await sendToAllGroups(message);
 }
