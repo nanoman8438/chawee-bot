@@ -596,8 +596,7 @@ async function handleEvent(event) {
   if (!isImage && event.message.type !== 'text') return null;
 
   let userText = isImage ? '' : event.message.text;
-  const isPrivateChat = event.source.type === 'user'; // 1:1 chat: every message is for the bot
-  let triggered = !isImage && (isPrivateChat || isTriggered(userText));
+  let triggered = !isImage && isTriggered(userText);
   let replyText = null;
   let fromMemory = false;
   let imageId = null;
@@ -606,7 +605,7 @@ async function handleEvent(event) {
   if (isImage) {
     if (!key) return null;
     pruneMemory();
-    if (!isPrivateChat && !awaitingQuestion.has(key)) {
+    if (!awaitingQuestion.has(key)) {
       recentImages.set(key, { id: event.message.id, at: Date.now() });
       return null;
     }
