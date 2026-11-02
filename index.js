@@ -126,7 +126,7 @@ function isNameOnly(text) {
   return text.replace(/@?ชาวี/g, '').replace(/[\s!?.,ๆ~]/g, '') === '';
 }
 
-const MEMORY_MS = 60 * 1000;
+const MEMORY_MS = 2 * 60 * 1000;
 const MEMORY_MAX_MESSAGES = 5;
 const recentMessages = new Map();
 const awaitingQuestion = new Map();
