@@ -11,12 +11,13 @@ const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
 };
 
-const TRIGGER_KEYWORDS = ['@ชาวี', 'ชาวี'];
 const RANDOM_REPLY_RATE = 0.1;
+const VISION_MODEL = process.env.VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
+const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // Groq caps base64 images at 4MB, and base64 adds ~33%
 
 const FINISH_SENTENCE_RULE = '- สำคัญมาก: ต้องพูดให้จบประโยคและจบความคิดในตัวเองเสมอ ห้ามตัดจบกลางคัน ห้ามทิ้งท้ายค้างคาแบบยังไม่จบเรื่อง ให้วางแผนความยาวคำตอบล่วงหน้าแล้วพูดให้ครบตามที่วางแผนไว้พอดี';
 
-const ELDEST_SON_PROMPT = `คุณคือ "ชาวี" ลูกชายคนโตของบ้าน อายุราว 40 ทำงานเป็นวิศวกร อยู่ในกลุ่ม LINE ครอบครัว 5 คน ปีนี้คือ พ.ศ. ${new Date().getFullYear() + 543}
+const ELDEST_SON_PROMPT = `คุณคือ "ชาวี" ลูกชายคนโตของบ้าน อายุราว 40 ทำงานเป็นวิศวกร อยู่ในกลุ่ม LINE ครอบครัว 5 คน
 
 สมาชิกในกลุ่ม (ชื่อ LINE จะแนบมากับข้อความในรูป [ชื่อคนพิมพ์: ...]):
 - ธีระเดช สุดโสภา คือพ่อ ชื่อเล่น เดช เกิด พ.ศ. 2503 เรียกว่า "พ่อ" และพูดลงท้าย "ครับ"
@@ -103,7 +104,9 @@ const PERSONA = PERSONAS[process.env.PERSONA] || PERSONAS.eldestSon;
 const RANDOM_REPLY_INSTRUCTION = 'ข้อความนี้ไม่ได้พิมพ์ถึงคุณโดยตรง แต่คุณบังเอิญเห็นคนในบ้านพิมพ์คุยกันแล้วอดไม่ได้ที่จะแทรกความเห็น ให้ตอบสั้นๆ แบบมีส่วนร่วมกับเนื้อหานั้น ไม่ต้องทักทายหรืออธิบายว่าใครพูดอะไร';
 
 const userProfiles = new Map();
-const groupIds = new Set();
+const groupIds = new Set(
+  (process.env.GROUP_IDS || '').split(',').map((id) => id.trim()).filter(Boolean)
+);
 
 const app = express();
 
@@ -114,6 +117,10 @@ function isTriggered(text) {
   return /@?ชาวี/.test(text);
 }
 
+function thaiNow() {
+  return new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'full', timeStyle: 'short' });
+}
+
 function isNameOnly(text) {
   return text.replace(/@?ชาวี/g, '').replace(/[\s!?.,ๆ~]/g, '') === '';
 }
@@ -122,6 +129,13 @@ const MEMORY_MS = 60 * 1000;
 const MEMORY_MAX_MESSAGES = 5;
 const recentMessages = new Map();
 const awaitingQuestion = new Map();
+const recentImages = new Map();
+
+function takeRecentImage(key) {
+  const image = recentImages.get(key);
+  recentImages.delete(key);
+  return image?.id ?? null;
+}
 
 function memoryKey(event) {
   const { groupId, roomId, userId } = event.source;
@@ -138,6 +152,9 @@ function pruneMemory() {
   }
   for (const [key, at] of awaitingQuestion) {
     if (at < cutoff) awaitingQuestion.delete(key);
+  }
+  for (const [key, image] of recentImages) {
+    if (image.at < cutoff) recentImages.delete(key);
   }
   const historyCutoff = Date.now() - HISTORY_MS;
   for (const [key, list] of chatHistory) {
@@ -328,6 +345,7 @@ async function extractWeatherQuery(userText, history = []) {
         {
           role: 'system',
           content:
+            `วันนี้คือ ${thaiNow()} ` +
             'แยกข้อมูลจากข้อความล่าสุดเรื่องสภาพอากาศ (ใช้บทสนทนาก่อนหน้าช่วยตีความ เช่น "แล้วเชียงใหม่ล่ะ" หลังคุยเรื่องอากาศ) ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกเหนือจาก JSON รูปแบบ: {"isWeather": <true ถ้าข้อความล่าสุดถามเรื่องสภาพอากาศ, false ถ้าเปลี่ยนเรื่องหรือแค่คุยเล่น>, "location": "<ชื่อเมือง/ประเทศเป็นภาษาอังกฤษสำหรับค้นหาสภาพอากาศ เช่น Tokyo, Chiang Mai, Paris, หรือ null ถ้าไม่ได้ระบุสถานที่>", "daysFromToday": <0 ถ้าถามวันนี้/ตอนนี้, 1 ถ้าพรุ่งนี้, 2 ถ้ามะรืนนี้ หรือจำนวนวันจากวันนี้ถ้าระบุวันที่อื่น (คำนวณเทียบกับวันนี้), หรือ 0 ถ้าไม่ได้ระบุวัน>}',
         },
         ...history,
@@ -519,20 +537,23 @@ async function sendDailyKnowledge() {
   await sendToAllGroups(message);
 }
 
-async function askGroq(userText, { isRandom = false, displayName = null, maxTokens: maxTokensOverride = null, history = [] } = {}, retries = 3) {
+async function askGroq(userText, { isRandom = false, displayName = null, maxTokens: maxTokensOverride = null, history = [], imageDataUrl = null } = {}, retries = 3) {
   const prefix = namePrefix(displayName);
-  const userContent = isRandom
+  const text = isRandom
     ? `${prefix}${RANDOM_REPLY_INSTRUCTION}\n\nข้อความที่เพื่อนพิมพ์: "${userText}"`
     : `${prefix}${userText}`;
+  const userContent = imageDataUrl
+    ? [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageDataUrl } }]
+    : text;
 
   const maxTokens = maxTokensOverride ?? (Math.random() < 0.5 ? 300 : 550);
 
   for (let i = 0; i < retries; i++) {
     try {
       const message = await groq.chat.completions.create({
-        model: 'openai/gpt-oss-120b',
+        model: imageDataUrl ? VISION_MODEL : 'openai/gpt-oss-120b',
         messages: [
-          { role: 'system', content: PERSONA.prompt },
+          { role: 'system', content: `${PERSONA.prompt}\n\nตอนนี้คือ ${thaiNow()} (เวลาประเทศไทย)` },
           ...history,
           { role: 'user', content: userContent },
         ],
@@ -606,22 +627,49 @@ async function answerNewsQuery(displayName, userText, history = []) {
   );
 }
 
-async function handleEvent(event) {
-  if (event.type !== 'message' || event.message.type !== 'text') {
-    return null;
-  }
+async function answerImage(messageId, question, displayName, history) {
+  const stream = await lineClient.getMessageContent(messageId);
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const image = Buffer.concat(chunks);
+  if (image.length > MAX_IMAGE_BYTES) throw new Error(`image too large: ${image.length} bytes`);
+  return askGroq(`${question || 'ช่วยดูรูปนี้ให้หน่อย'}\n\n(มีรูปภาพแนบมา ให้ดูรูปแล้วตอบตามคาแรกเตอร์)`, {
+    displayName,
+    history,
+    maxTokens: 1000,
+    imageDataUrl: `data:image/jpeg;base64,${image.toString('base64')}`,
+  });
+}
 
-  let userText = event.message.text;
-  let triggered = isTriggered(userText);
+async function handleEvent(event) {
+  if (event.type !== 'message') return null;
+  const isImage = event.message.type === 'image';
+  if (!isImage && event.message.type !== 'text') return null;
+
+  let userText = isImage ? '' : event.message.text;
+  let triggered = !isImage && isTriggered(userText);
   let replyText = null;
   let fromMemory = false;
+  let imageId = null;
 
   const key = memoryKey(event);
-  if (key) {
+  if (isImage) {
+    if (!key) return null;
+    pruneMemory();
+    if (!awaitingQuestion.has(key)) {
+      recentImages.set(key, { id: event.message.id, at: Date.now() });
+      return null;
+    }
+    awaitingQuestion.delete(key);
+    imageId = event.message.id;
+    triggered = true;
+    fromMemory = true;
+  } else if (key) {
     pruneMemory();
     if (triggered && isNameOnly(userText)) {
       const recent = takeRecentMessages(key);
-      if (recent.length) {
+      imageId = takeRecentImage(key);
+      if (recent.length || imageId) {
         userText = recent.join('\n');
         fromMemory = true;
       } else {
@@ -631,6 +679,7 @@ async function handleEvent(event) {
     } else if (triggered) {
       awaitingQuestion.delete(key);
       recentMessages.delete(key);
+      imageId = takeRecentImage(key);
     } else if (awaitingQuestion.has(key)) {
       awaitingQuestion.delete(key);
       triggered = true;
@@ -643,11 +692,11 @@ async function handleEvent(event) {
     return null;
   }
 
-  const intent = triggered ? detectIntent(userText) : null;
+  const intent = triggered && !imageId ? detectIntent(userText) : null;
 
   if (replyText !== null) {
     // name-only call with nothing to answer yet
-  } else if (!intent && !fromMemory && PERSONA.quotes.length && Math.random() < 0.15) {
+  } else if (!intent && !fromMemory && !imageId && PERSONA.quotes.length && Math.random() < 0.15) {
     replyText = getRandomQuote();
   } else {
     try {
@@ -661,7 +710,9 @@ async function handleEvent(event) {
       const weatherFollowUp = triggered && !intent && lastUserIntent(historyKey) === 'weather';
       let answeredIntent = null;
 
-      if (intent === 'weather' || weatherFollowUp) {
+      if (imageId) {
+        replyText = await answerImage(imageId, userText, displayName, history);
+      } else if (intent === 'weather' || weatherFollowUp) {
         replyText = await answerWeatherQuery(displayName, userText, history, weatherFollowUp);
         if (replyText) answeredIntent = 'weather';
       } else if (intent === 'news') {
@@ -671,7 +722,8 @@ async function handleEvent(event) {
       if (!replyText) {
         replyText = await askGroq(userText, { isRandom: !triggered, displayName, history });
       }
-      if (historyKey) appendHistory(historyKey, displayName, userText, replyText, answeredIntent);
+      const historyText = imageId ? `[ส่งรูปภาพ] ${userText}`.trim() : userText;
+      if (historyKey) appendHistory(historyKey, displayName, historyText, replyText, answeredIntent);
     } catch (err) {
       console.error('Groq error:', err);
       if (!triggered) return null;
