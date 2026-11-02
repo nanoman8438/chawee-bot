@@ -123,7 +123,10 @@ function thaiNow() {
 }
 
 function isNameOnly(text) {
-  return text.replace(/@?ชาวี/g, '').replace(/[\s!?.,ๆ~]/g, '') === '';
+  // "พี่ชาวี", "ชาวีครับ", "น้องชาวีจ๋า" all count as just calling the bot
+  return text
+    .replace(/(พี่|น้อง|คุณ|ไอ้)?\s*@?ชาวี/g, '')
+    .replace(/ครับ|คับ|ค่ะ|คะ|จ้า|จ้ะ|จ๋า|นะ|เอ้ย|เอ๋ย|ๆ|[\s!?.,~]/g, '') === '';
 }
 
 const MEMORY_MS = 2 * 60 * 1000;
