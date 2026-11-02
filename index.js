@@ -50,6 +50,45 @@ function isTriggered(text) {
   return /@?ชาวี/.test(text);
 }
 
+function isNameOnly(text) {
+  return text.replace(/@?ชาวี/g, '').replace(/[\s!?.,ๆ~]/g, '') === '';
+}
+
+const MEMORY_MS = 60 * 1000;
+const MEMORY_MAX_MESSAGES = 5;
+const recentMessages = new Map();
+const awaitingQuestion = new Map();
+
+function memoryKey(event) {
+  const { groupId, roomId, userId } = event.source;
+  return userId ? `${groupId || roomId || 'dm'}:${userId}` : null;
+}
+
+// ponytail: full sweep per event, fine for a few groups; switch to setInterval sweep if traffic grows
+function pruneMemory() {
+  const cutoff = Date.now() - MEMORY_MS;
+  for (const [key, list] of recentMessages) {
+    const fresh = list.filter((m) => m.at >= cutoff);
+    if (fresh.length) recentMessages.set(key, fresh);
+    else recentMessages.delete(key);
+  }
+  for (const [key, at] of awaitingQuestion) {
+    if (at < cutoff) awaitingQuestion.delete(key);
+  }
+}
+
+function rememberMessage(key, text) {
+  const list = recentMessages.get(key) || [];
+  list.push({ text, at: Date.now() });
+  recentMessages.set(key, list.slice(-MEMORY_MAX_MESSAGES));
+}
+
+function takeRecentMessages(key) {
+  const list = recentMessages.get(key) || [];
+  recentMessages.delete(key);
+  return list.map((m) => m.text);
+}
+
 async function getDisplayName(event) {
   const userId = event.source.userId;
   if (!userId) return null;
@@ -461,17 +500,43 @@ async function handleEvent(event) {
     return null;
   }
 
-  const userText = event.message.text;
-  const triggered = isTriggered(userText);
+  let userText = event.message.text;
+  let triggered = isTriggered(userText);
+  let replyText = null;
+  let fromMemory = false;
+
+  const key = memoryKey(event);
+  if (key) {
+    pruneMemory();
+    if (triggered && isNameOnly(userText)) {
+      const recent = takeRecentMessages(key);
+      if (recent.length) {
+        userText = recent.join('\n');
+        fromMemory = true;
+      } else {
+        awaitingQuestion.set(key, Date.now());
+        replyText = 'นี่เธอ! เรียกชาวีแล้วจะถามอะไรล่ะ พิมพ์มาเลยสิ';
+      }
+    } else if (triggered) {
+      awaitingQuestion.delete(key);
+      recentMessages.delete(key);
+    } else if (awaitingQuestion.has(key)) {
+      awaitingQuestion.delete(key);
+      triggered = true;
+      fromMemory = true;
+    }
+  }
 
   if (!triggered && Math.random() >= RANDOM_REPLY_RATE) {
+    if (key) rememberMessage(key, userText);
     return null;
   }
 
   const intent = triggered ? detectIntent(userText) : null;
 
-  let replyText;
-  if (!intent && Math.random() < 0.15) {
+  if (replyText !== null) {
+    // name-only call with nothing to answer yet
+  } else if (!intent && !fromMemory && Math.random() < 0.15) {
     replyText = getRandomQuote();
   } else {
     try {
