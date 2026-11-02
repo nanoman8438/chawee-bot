@@ -75,6 +75,49 @@ function pruneMemory() {
   for (const [key, at] of awaitingQuestion) {
     if (at < cutoff) awaitingQuestion.delete(key);
   }
+  const historyCutoff = Date.now() - HISTORY_MS;
+  for (const [key, list] of chatHistory) {
+    const fresh = list.filter((m) => m.at >= historyCutoff);
+    if (fresh.length) chatHistory.set(key, fresh);
+    else chatHistory.delete(key);
+  }
+}
+
+const HISTORY_MS = 60 * 60 * 1000;
+const HISTORY_MAX_MESSAGES = 20;
+const HISTORY_BOT_REPLY_CHARS = 800;
+const chatHistory = new Map();
+
+function chatKey(event) {
+  const { groupId, roomId, userId } = event.source;
+  return groupId || roomId || userId || null;
+}
+
+function namePrefix(displayName) {
+  return displayName ? `[ชื่อคนพิมพ์: ${displayName}]\n` : '';
+}
+
+function freshHistory(key) {
+  const cutoff = Date.now() - HISTORY_MS;
+  return (chatHistory.get(key) || []).filter((m) => m.at >= cutoff);
+}
+
+function getHistory(key) {
+  return freshHistory(key).map(({ role, content }) => ({ role, content }));
+}
+
+function lastUserIntent(key) {
+  return freshHistory(key).findLast((m) => m.role === 'user')?.intent ?? null;
+}
+
+function appendHistory(key, displayName, userText, botReply, intent) {
+  const now = Date.now();
+  const list = chatHistory.get(key) || [];
+  list.push(
+    { role: 'user', content: `${namePrefix(displayName)}${userText}`, at: now, intent },
+    { role: 'assistant', content: botReply.slice(0, HISTORY_BOT_REPLY_CHARS), at: now }
+  );
+  chatHistory.set(key, list.slice(-HISTORY_MAX_MESSAGES));
 }
 
 function rememberMessage(key, text) {
@@ -213,7 +256,7 @@ async function getWeatherReport(city = 'Bangkok,TH', daysFromToday = 0) {
   }
 }
 
-async function extractWeatherQuery(userText) {
+async function extractWeatherQuery(userText, history = []) {
   try {
     const res = await groq.chat.completions.create({
       model: 'openai/gpt-oss-120b',
@@ -221,8 +264,9 @@ async function extractWeatherQuery(userText) {
         {
           role: 'system',
           content:
-            'แยกข้อมูลจากคำถามเรื่องสภาพอากาศ ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกเหนือจาก JSON รูปแบบ: {"location": "<ชื่อเมือง/ประเทศเป็นภาษาอังกฤษสำหรับค้นหาสภาพอากาศ เช่น Tokyo, Chiang Mai, Paris, หรือ null ถ้าไม่ได้ระบุสถานที่>", "daysFromToday": <0 ถ้าถามวันนี้/ตอนนี้, 1 ถ้าพรุ่งนี้, 2 ถ้ามะรืนนี้ หรือจำนวนวันจากวันนี้ถ้าระบุวันที่อื่น (คำนวณเทียบกับวันนี้), หรือ 0 ถ้าไม่ได้ระบุวัน>}',
+            'แยกข้อมูลจากข้อความล่าสุดเรื่องสภาพอากาศ (ใช้บทสนทนาก่อนหน้าช่วยตีความ เช่น "แล้วเชียงใหม่ล่ะ" หลังคุยเรื่องอากาศ) ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกเหนือจาก JSON รูปแบบ: {"isWeather": <true ถ้าข้อความล่าสุดถามเรื่องสภาพอากาศ, false ถ้าเปลี่ยนเรื่องหรือแค่คุยเล่น>, "location": "<ชื่อเมือง/ประเทศเป็นภาษาอังกฤษสำหรับค้นหาสภาพอากาศ เช่น Tokyo, Chiang Mai, Paris, หรือ null ถ้าไม่ได้ระบุสถานที่>", "daysFromToday": <0 ถ้าถามวันนี้/ตอนนี้, 1 ถ้าพรุ่งนี้, 2 ถ้ามะรืนนี้ หรือจำนวนวันจากวันนี้ถ้าระบุวันที่อื่น (คำนวณเทียบกับวันนี้), หรือ 0 ถ้าไม่ได้ระบุวัน>}',
         },
+        ...history,
         { role: 'user', content: userText },
       ],
       temperature: 0,
@@ -230,15 +274,16 @@ async function extractWeatherQuery(userText) {
     });
     const raw = res.choices[0].message.content.trim();
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { location: null, daysFromToday: 0 };
+    if (!jsonMatch) return { isWeather: true, location: null, daysFromToday: 0 };
     const parsed = JSON.parse(jsonMatch[0]);
     return {
+      isWeather: parsed.isWeather !== false,
       location: typeof parsed.location === 'string' ? parsed.location : null,
       daysFromToday: typeof parsed.daysFromToday === 'number' ? parsed.daysFromToday : 0,
     };
   } catch (err) {
     console.error('extractWeatherQuery failed:', err.message);
-    return { location: null, daysFromToday: 0 };
+    return { isWeather: true, location: null, daysFromToday: 0 };
   }
 }
 
@@ -410,11 +455,11 @@ async function sendDailyKnowledge() {
   await sendToAllGroups(message);
 }
 
-async function askGroq(userText, { isRandom = false, displayName = null, maxTokens: maxTokensOverride = null } = {}, retries = 3) {
-  const namePrefix = displayName ? `[ชื่อคนพิมพ์: ${displayName}]\n` : '';
+async function askGroq(userText, { isRandom = false, displayName = null, maxTokens: maxTokensOverride = null, history = [] } = {}, retries = 3) {
+  const prefix = namePrefix(displayName);
   const userContent = isRandom
-    ? `${namePrefix}${RANDOM_REPLY_INSTRUCTION}\n\nข้อความที่เพื่อนพิมพ์: "${userText}"`
-    : `${namePrefix}${userText}`;
+    ? `${prefix}${RANDOM_REPLY_INSTRUCTION}\n\nข้อความที่เพื่อนพิมพ์: "${userText}"`
+    : `${prefix}${userText}`;
 
   const maxTokens = maxTokensOverride ?? (Math.random() < 0.5 ? 300 : 550);
 
@@ -424,6 +469,7 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
         model: 'openai/gpt-oss-120b',
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
+          ...history,
           { role: 'user', content: userContent },
         ],
         temperature: 0.5,
@@ -446,8 +492,9 @@ function detectIntent(text) {
 
 const LONG_ANSWER_INSTRUCTION = 'สรุปข้อมูลให้ครบถ้วนจบในตัวเอง วางแผนความยาวล่วงหน้าให้พอดีกับเนื้อหา ห้ามตัดข้อความทิ้งกลางคันโดยที่ข้อมูลยังไม่ครบ';
 
-async function answerWeatherQuery(displayName, userText) {
-  const { location, daysFromToday } = await extractWeatherQuery(userText);
+async function answerWeatherQuery(displayName, userText, history = [], followUp = false) {
+  const { isWeather, location, daysFromToday } = await extractWeatherQuery(userText, history.slice(-4));
+  if (followUp && !isWeather) return null;
   const city = location || 'Bangkok,TH';
   const cityLabel = location || 'กรุงเทพฯ';
   const days = daysFromToday || 0;
@@ -455,7 +502,7 @@ async function answerWeatherQuery(displayName, userText) {
   if (days > 5 || days < 0) {
     return askGroq(
       `มีคนถามพยากรณ์อากาศของ ${cityLabel} แต่เป็นวันที่ไกลเกินไป (เกิน 5 วันข้างหน้า หรือเป็นวันในอดีต) ซึ่งชาวีไม่มีข้อมูลระดับนั้น ให้ตอบขอโทษแบบมีเสน่ห์ตามคาแรกเตอร์ พร้อมแนะนำให้ถามพยากรณ์ในช่วง 5 วันข้างหน้าแทน`,
-      { displayName }
+      { displayName, history }
     );
   }
 
@@ -468,11 +515,11 @@ async function answerWeatherQuery(displayName, userText) {
   const weatherData = `${weather.location} (${dayLabel}): ${weather.temp}°C รู้สึกเหมือน ${weather.feelsLike}°C สภาพอากาศ: ${weather.description} ความชื้น ${weather.humidity}%`;
   return askGroq(
     `มีคนถามสภาพอากาศ ให้ตอบโดยอ้างอิงข้อมูลจริงนี้เท่านั้น ห้ามมั่วหรือเปลี่ยนตัวเลข: ${weatherData}\n\n${LONG_ANSWER_INSTRUCTION}`,
-    { displayName, maxTokens: 1000 }
+    { displayName, maxTokens: 1000, history }
   );
 }
 
-async function answerNewsQuery(displayName, userText) {
+async function answerNewsQuery(displayName, userText, history = []) {
   const query = extractNewsQuery(userText);
   const searchResults = query ? await searchNews(query) : null;
 
@@ -491,7 +538,7 @@ async function answerNewsQuery(displayName, userText) {
 
   return askGroq(
     `มีคนถามข่าว ให้ตอบโดยอ้างอิงข้อมูลจริงต่อไปนี้เท่านั้น ห้ามมั่วหรือแต่งเนื้อข่าวเพิ่มเติม:\n${newsData}\n\n${LONG_ANSWER_INSTRUCTION}`,
-    { displayName, maxTokens: 1000 }
+    { displayName, maxTokens: 1000, history }
   );
 }
 
@@ -545,13 +592,22 @@ async function handleEvent(event) {
         new Promise((resolve) => setTimeout(() => resolve(null), 800)),
       ]);
 
-      if (intent === 'weather') {
-        replyText = await answerWeatherQuery(displayName, userText);
+      const historyKey = chatKey(event);
+      const history = getHistory(historyKey);
+      const weatherFollowUp = triggered && !intent && lastUserIntent(historyKey) === 'weather';
+      let answeredIntent = null;
+
+      if (intent === 'weather' || weatherFollowUp) {
+        replyText = await answerWeatherQuery(displayName, userText, history, weatherFollowUp);
+        if (replyText) answeredIntent = 'weather';
       } else if (intent === 'news') {
-        replyText = await answerNewsQuery(displayName, userText);
-      } else {
-        replyText = await askGroq(userText, { isRandom: !triggered, displayName });
+        replyText = await answerNewsQuery(displayName, userText, history);
+        answeredIntent = 'news';
       }
+      if (!replyText) {
+        replyText = await askGroq(userText, { isRandom: !triggered, displayName, history });
+      }
+      if (historyKey) appendHistory(historyKey, displayName, userText, replyText, answeredIntent);
     } catch (err) {
       console.error('Groq error:', err);
       if (!triggered) return null;
