@@ -191,15 +191,11 @@ function getHistory(key) {
   return freshHistory(key).map(({ role, content }) => ({ role, content }));
 }
 
-function lastUserIntent(key) {
-  return freshHistory(key).findLast((m) => m.role === 'user')?.intent ?? null;
-}
-
-function appendHistory(key, displayName, userText, botReply, intent) {
+function appendHistory(key, displayName, userText, botReply) {
   const now = Date.now();
   const list = chatHistory.get(key) || [];
   list.push(
-    { role: 'user', content: `${namePrefix(displayName)}${userText}`, at: now, intent },
+    { role: 'user', content: `${namePrefix(displayName)}${userText}`, at: now },
     { role: 'assistant', content: botReply.slice(0, HISTORY_BOT_REPLY_CHARS), at: now }
   );
   chatHistory.set(key, list.slice(-HISTORY_MAX_MESSAGES));
@@ -366,42 +362,51 @@ async function getWeatherReport(city = 'Bangkok,TH', daysFromToday = 0) {
   }
 }
 
-async function extractWeatherQuery(userText, history = []) {
+// Router: a small fast model reads each question and picks how to answer it.
+// On any failure it falls back to "search", the most capable route.
+const ROUTES = ['chat', 'think', 'search', 'weather', 'news'];
+const ROUTER_PROMPT = `เลือกวิธีตอบข้อความล่าสุดของแชท (ใช้บทสนทนาก่อนหน้าช่วยตีความ เช่น "แล้วเชียงใหม่ล่ะ" หลังคุยเรื่องอากาศ = weather) ตอบเป็น JSON เท่านั้น รูปแบบ {"route": "...", "location": ..., "daysFromToday": ...}
+route:
+- "chat" คุยเล่น ทักทาย ขอบคุณ ระบายความรู้สึก หรือคำถามง่ายที่ตอบได้จากความรู้ทั่วไปโดยไม่ต้องใช้ข้อมูลล่าสุด
+- "think" ต้องคิดวิเคราะห์ คำนวณ วางแผน เปรียบเทียบ ให้คำแนะนำเชิงลึก หรืออธิบายเรื่องยาก
+- "search" ต้องใช้ข้อมูลจริงหรือข้อมูลล่าสุด เช่น ราคา ผลกีฬา หวย เวลาเปิดปิด ข้อมูลสินค้า สถานที่ หรือข้อเท็จจริงที่ไม่แน่ใจ
+- "weather" ถามสภาพอากาศ ฝน อุณหภูมิ หรือฝุ่น PM2.5
+- "news" ถามข่าว
+location: ชื่อเมืองเป็นภาษาอังกฤษสำหรับค้นอากาศ เช่น Chiang Mai หรือ null ถ้าไม่ระบุ
+daysFromToday: 0 วันนี้/ตอนนี้, 1 พรุ่งนี้, 2 มะรืนนี้ หรือจำนวนวันจากวันนี้`;
+
+async function routeQuestion(userText, history = []) {
+  const fallback = { route: 'search', location: null, daysFromToday: 0 };
   try {
     const res = await groq.chat.completions.create({
-      model: 'openai/gpt-oss-120b',
+      model: 'openai/gpt-oss-20b',
       messages: [
-        {
-          role: 'system',
-          content:
-            `วันนี้คือ ${thaiNow()} ` +
-            'แยกข้อมูลจากข้อความล่าสุดเรื่องสภาพอากาศ (ใช้บทสนทนาก่อนหน้าช่วยตีความ เช่น "แล้วเชียงใหม่ล่ะ" หลังคุยเรื่องอากาศ) ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกเหนือจาก JSON รูปแบบ: {"isWeather": <true ถ้าข้อความล่าสุดถามเรื่องสภาพอากาศหรือฝุ่น PM2.5, false ถ้าเปลี่ยนเรื่องหรือแค่คุยเล่น>, "location": "<ชื่อเมือง/ประเทศเป็นภาษาอังกฤษสำหรับค้นหาสภาพอากาศ เช่น Tokyo, Chiang Mai, Paris, หรือ null ถ้าไม่ได้ระบุสถานที่>", "daysFromToday": <0 ถ้าถามวันนี้/ตอนนี้, 1 ถ้าพรุ่งนี้, 2 ถ้ามะรืนนี้ หรือจำนวนวันจากวันนี้ถ้าระบุวันที่อื่น (คำนวณเทียบกับวันนี้), หรือ 0 ถ้าไม่ได้ระบุวัน>}',
-        },
-        ...history,
+        { role: 'system', content: `วันนี้คือ ${thaiNow()}\n${ROUTER_PROMPT}` },
+        ...history.slice(-6),
         { role: 'user', content: userText },
       ],
       temperature: 0,
-      max_tokens: 100,
+      reasoning_effort: 'low',
+      max_tokens: 600, // reasoning tokens count toward this, so leave room beyond the short JSON
     });
-    const raw = res.choices[0].message.content.trim();
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { isWeather: true, location: null, daysFromToday: 0 };
-    const parsed = JSON.parse(jsonMatch[0]);
+    const json = (res.choices[0].message.content || '').match(/\{[\s\S]*\}/);
+    if (!json) return fallback;
+    const parsed = JSON.parse(json[0]);
     return {
-      isWeather: parsed.isWeather !== false,
+      route: ROUTES.includes(parsed.route) ? parsed.route : 'search',
       location: typeof parsed.location === 'string' ? parsed.location : null,
       daysFromToday: typeof parsed.daysFromToday === 'number' ? parsed.daysFromToday : 0,
     };
   } catch (err) {
-    console.error('extractWeatherQuery failed:', err.message);
-    return { isWeather: true, location: null, daysFromToday: 0 };
+    console.error('routeQuestion failed:', err.message);
+    return fallback;
   }
 }
 
 async function translateToThai(text) {
   try {
     const res = await groq.chat.completions.create({
-      model: 'openai/gpt-oss-120b',
+      model: 'openai/gpt-oss-20b',
       messages: [
         {
           role: 'system',
@@ -410,7 +415,8 @@ async function translateToThai(text) {
         { role: 'user', content: text },
       ],
       temperature: 0.3,
-      max_tokens: 200,
+      reasoning_effort: 'low',
+      max_tokens: 600,
     });
     return res.choices[0].message.content.trim();
   } catch (err) {
@@ -495,7 +501,7 @@ async function getThaiTopNews() {
   try {
     const text = await askGroq(
       `ค้นเว็บข่าวไทย (เช่น ไทยรัฐ ไทยพีบีเอส มติชน ข่าวสด sanook kapook) แล้วสรุปข่าวเด่นของวันนี้ 3 เรื่อง ใช้เฉพาะข่าวที่สื่อไทยรายงาน ข่าวต่างประเทศเอาได้เฉพาะที่สื่อไทยนำมารายงาน ห้ามแต่งข่าวเอง แต่ละเรื่องให้มีหัวข่าวสั้นๆ สรุป 1-2 บรรทัด และ (ที่มา: ชื่อสำนักข่าว) ตอบเฉพาะรายการข่าว ไม่ต้องทักทาย ถ้าหาข่าวไม่เจอให้ตอบคำว่า NONE คำเดียว`,
-      { maxTokens: 1200 }
+      { maxTokens: 1200, mode: 'search' }
     );
     return text && !text.includes('NONE') ? text.trim() : null;
   } catch (err) {
@@ -522,8 +528,18 @@ async function sendDailyKnowledge() {
   await sendToAllGroups(message);
 }
 
-// Last resort when Groq is down: text only, no web search (free tier has no search on Gemini 3+)
-async function askGemini(messages, maxTokens) {
+// Takes OpenAI-style message content (string, or [text, image_url data URL]) and returns Gemini parts
+function toGeminiParts(content) {
+  if (typeof content === 'string') return [{ text: content }];
+  return content.map((part) => {
+    if (part.type === 'text') return { text: part.text };
+    const [, mimeType, data] = part.image_url.url.match(/^data:(.+?);base64,(.+)$/);
+    return { inline_data: { mime_type: mimeType, data } };
+  });
+}
+
+// Last resort when Groq is down; no web search (free tier has no search on Gemini 3+)
+async function askGemini(messages, maxTokens, temperature = PERSONA.temperature) {
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
@@ -531,9 +547,9 @@ async function askGemini(messages, maxTokens) {
       systemInstruction: { parts: [{ text: messages[0].content }] },
       contents: messages.slice(1).map((m) => ({
         role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: typeof m.content === 'string' ? m.content : m.content[0].text }],
+        parts: toGeminiParts(m.content),
       })),
-      generationConfig: { maxOutputTokens: maxTokens, temperature: PERSONA.temperature },
+      generationConfig: { maxOutputTokens: maxTokens, temperature },
     }),
   });
   if (!res.ok) throw new Error(`Gemini HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
@@ -543,59 +559,62 @@ async function askGemini(messages, maxTokens) {
   return text;
 }
 
-async function askGroq(userText, { isRandom = false, displayName = null, maxTokens: maxTokensOverride = null, history = [], imageDataUrl = null } = {}, retries = 3) {
+// How gpt-oss handles each route. Reasoning and search results count toward max_tokens,
+// so each mode adds headroom on top of the visible answer length.
+const MODES = {
+  chat: { reasoning_effort: 'low', headroom: 1000, search: false },
+  think: { reasoning_effort: 'high', headroom: 4000, search: true },
+  search: { reasoning_effort: 'medium', headroom: 2000, search: true },
+};
+// Errors that won't go away by retrying the same request (bad request, auth, retired model, too large)
+const NON_RETRYABLE = [400, 401, 403, 404, 413, 422];
+
+async function askGroq(userText, { isRandom = false, displayName = null, maxTokens: maxTokensOverride = null, history = [], mode = 'search' } = {}, retries = 3) {
   const prefix = namePrefix(displayName);
   const text = isRandom
     ? `${prefix}${RANDOM_REPLY_INSTRUCTION}\n\nข้อความที่เพื่อนพิมพ์: "${userText}"`
     : `${prefix}${userText}`;
-  const userContent = imageDataUrl
-    ? [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageDataUrl } }]
-    : text;
 
   const maxTokens = maxTokensOverride ?? (Math.random() < 0.5 ? 300 : 550);
+  const { reasoning_effort, headroom, search } = MODES[mode];
   const messages = [
     { role: 'system', content: `${PERSONA.prompt}\n\nตอนนี้คือ ${thaiNow()} (เวลาประเทศไทย)` },
     ...history,
-    { role: 'user', content: userContent },
+    { role: 'user', content: text },
   ];
 
   for (let i = 0; i < retries; i++) {
     try {
       const message = await groq.chat.completions.create({
         // last retry falls back to the smaller model in case 120b is down or rate-limited
-        model: imageDataUrl ? VISION_MODEL : i === retries - 1 ? 'openai/gpt-oss-20b' : 'openai/gpt-oss-120b',
+        model: i === retries - 1 ? 'openai/gpt-oss-20b' : 'openai/gpt-oss-120b',
         messages,
         temperature: PERSONA.temperature,
-        // gpt-oss counts reasoning and search results toward max_tokens, so give it headroom
-        ...(imageDataUrl
-          ? { max_tokens: maxTokens }
-          : { max_tokens: maxTokens + 2000, reasoning_effort: 'medium', tools: [{ type: 'browser_search' }] }),
+        max_tokens: maxTokens + headroom,
+        reasoning_effort,
+        ...(search ? { tools: [{ type: 'browser_search' }] } : {}),
       });
       // browser_search leaves citation marks like 【2†L62-L68】
       return message.choices[0].message.content.replace(/\s*【[^】]*】/g, '');
     } catch (err) {
       console.error(`Groq attempt ${i + 1} failed:`, err.message);
       if (i === retries - 1) {
-        if (!process.env.GEMINI_API_KEY || imageDataUrl) throw err;
+        if (!process.env.GEMINI_API_KEY) throw err;
         console.log('Falling back to Gemini');
         return askGemini(messages, maxTokens);
+      }
+      if (NON_RETRYABLE.includes(err.status)) {
+        i = retries - 2; // skip straight to the 20b attempt, no waiting
+        continue;
       }
       await new Promise((resolve) => setTimeout(resolve, 2000 * (i + 1)));
     }
   }
 }
 
-function detectIntent(text) {
-  if (/สภาพอากาศ|อากาศ(เป็นไง|วันนี้|ตอนนี้)?|ฝนตก|ร้อนไหม|weather|ฝุ่น|pm ?2\.?5/i.test(text)) return 'weather';
-  if (/ข่าว(เด่น|วันนี้|ล่าสุด)?|news/i.test(text)) return 'news';
-  return null;
-}
-
 const LONG_ANSWER_INSTRUCTION = 'สรุปข้อมูลให้ครบถ้วนจบในตัวเอง วางแผนความยาวล่วงหน้าให้พอดีกับเนื้อหา ห้ามตัดข้อความทิ้งกลางคันโดยที่ข้อมูลยังไม่ครบ';
 
-async function answerWeatherQuery(displayName, userText, history = [], followUp = false) {
-  const { isWeather, location, daysFromToday } = await extractWeatherQuery(userText, history.slice(-4));
-  if (followUp && !isWeather) return null;
+async function answerWeatherQuery(displayName, history, location, daysFromToday) {
   const city = location || 'Bangkok,TH';
   const cityLabel = location || 'กรุงเทพฯ';
   const days = daysFromToday || 0;
@@ -603,7 +622,7 @@ async function answerWeatherQuery(displayName, userText, history = [], followUp 
   if (days > 5 || days < 0) {
     return askGroq(
       `มีคนถามพยากรณ์อากาศของ ${cityLabel} แต่เป็นวันที่ไกลเกินไป (เกิน 5 วันข้างหน้า หรือเป็นวันในอดีต) ซึ่งชาวีไม่มีข้อมูลระดับนั้น ให้ตอบขอโทษตามคาแรกเตอร์ พร้อมแนะนำให้ถามพยากรณ์ในช่วง 5 วันข้างหน้าแทน`,
-      { displayName, history }
+      { displayName, history, mode: 'chat' }
     );
   }
 
@@ -616,7 +635,7 @@ async function answerWeatherQuery(displayName, userText, history = [], followUp 
   const weatherData = `${weather.location} (${dayLabel}): ${weather.temp}°C รู้สึกเหมือน ${weather.feelsLike}°C สภาพอากาศ: ${weather.description} ความชื้น ${weather.humidity}%${weather.pm25 != null ? ` ฝุ่น PM2.5 ตอนนี้ ${weather.pm25} µg/m³ (${pm25Label(weather.pm25)} ตามเกณฑ์กรมควบคุมมลพิษ)` : ''}`;
   return askGroq(
     `มีคนถามสภาพอากาศ ให้ตอบโดยอ้างอิงข้อมูลจริงนี้เท่านั้น ห้ามมั่วหรือเปลี่ยนตัวเลข: ${weatherData}\n\n${LONG_ANSWER_INSTRUCTION}`,
-    { displayName, maxTokens: 1000, history }
+    { displayName, maxTokens: 1000, history, mode: 'chat' }
   );
 }
 
@@ -647,15 +666,33 @@ async function transcribeAudio(messageId) {
   return (res.text || '').trim();
 }
 
+// Vision model only describes the picture (Gemini if it fails); the main model then
+// answers in character and can search the web about what was seen.
+async function describeImage(imageDataUrl, question) {
+  const prompt = `อธิบายรูปนี้อย่างละเอียดเป็นภาษาไทย: สิ่งที่เห็น ข้อความในรูป ยี่ห้อ ชนิดหรือสายพันธุ์ถ้าดูออก${question ? ` โดยเน้นส่วนที่เกี่ยวกับคำถาม: "${question}"` : ''} ห้ามเดาเกินกว่าที่เห็น`;
+  const messages = [
+    { role: 'system', content: 'คุณคือระบบอธิบายรูปภาพ ตอบเฉพาะคำอธิบายรูป' },
+    { role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: imageDataUrl } }] },
+  ];
+  try {
+    const res = await groq.chat.completions.create({ model: VISION_MODEL, messages, temperature: 0.2, max_tokens: 800 });
+    return res.choices[0].message.content;
+  } catch (err) {
+    console.error('Vision model failed:', err.message);
+    if (!process.env.GEMINI_API_KEY) throw err;
+    console.log('Falling back to Gemini vision');
+    return askGemini(messages, 800, 0.2);
+  }
+}
+
 async function answerImage(messageId, question, displayName, history) {
   const image = await downloadContent(messageId);
   if (image.length > MAX_IMAGE_BYTES) throw new Error(`image too large: ${image.length} bytes`);
-  return askGroq(`${question || 'ช่วยดูรูปนี้ให้หน่อย'}\n\n(มีรูปภาพแนบมา ให้ดูรูปแล้วตอบตามคาแรกเตอร์)`, {
-    displayName,
-    history,
-    maxTokens: 1000,
-    imageDataUrl: `data:image/jpeg;base64,${image.toString('base64')}`,
-  });
+  const description = await describeImage(`data:image/jpeg;base64,${image.toString('base64')}`, question);
+  return askGroq(
+    `${question || 'ช่วยดูรูปนี้ให้หน่อย'}\n\n[มีรูปแนบมา ระบบดูรูปอธิบายไว้ว่า: ${description}]\n(ตอบเหมือนเห็นรูปเอง ถ้าต้องใช้ข้อมูลเพิ่ม เช่น วิธีดูแล ราคา หรือวิธีใช้ ให้ค้นเว็บ)`,
+    { displayName, history, maxTokens: 1000, mode: 'search' }
+  );
 }
 
 async function handleEvent(event) {
@@ -720,11 +757,9 @@ async function handleEvent(event) {
     return null;
   }
 
-  const intent = triggered && !imageId ? detectIntent(userText) : null;
-
   if (replyText !== null) {
     // name-only call with nothing to answer yet
-  } else if (!intent && !fromMemory && !imageId && PERSONA.quotes.length && Math.random() < 0.15) {
+  } else if (!fromMemory && !imageId && PERSONA.quotes.length && Math.random() < 0.15) {
     replyText = getRandomQuote();
   } else {
     try {
@@ -735,23 +770,24 @@ async function handleEvent(event) {
 
       const historyKey = chatKey(event);
       const history = getHistory(historyKey);
-      const weatherFollowUp = triggered && !intent && lastUserIntent(historyKey) === 'weather';
-      let answeredIntent = null;
-
       if (imageId) {
         replyText = await answerImage(imageId, userText, displayName, history);
-      } else if (intent === 'weather' || weatherFollowUp) {
-        replyText = await answerWeatherQuery(displayName, userText, history, weatherFollowUp);
-        if (replyText) answeredIntent = 'weather';
-      } else if (intent === 'news') {
-        replyText = await answerNewsQuery(displayName, userText, history);
-        answeredIntent = 'news';
-      }
-      if (!replyText) {
-        replyText = await askGroq(userText, { isRandom: !triggered, displayName, history });
+      } else if (!triggered) {
+        // random interjection: keep it light and cheap, no router
+        replyText = await askGroq(userText, { isRandom: true, displayName, history, mode: 'chat' });
+      } else {
+        const { route, location, daysFromToday } = await routeQuestion(userText, history);
+        console.log(`🧭 route: ${route}`);
+        if (route === 'weather') {
+          replyText = await answerWeatherQuery(displayName, history, location, daysFromToday);
+        } else if (route === 'news') {
+          replyText = await answerNewsQuery(displayName, userText, history);
+        } else {
+          replyText = await askGroq(userText, { displayName, history, mode: route });
+        }
       }
       const historyText = imageId ? `[ส่งรูปภาพ] ${userText}`.trim() : userText;
-      if (historyKey) appendHistory(historyKey, displayName, historyText, replyText, answeredIntent);
+      if (historyKey) appendHistory(historyKey, displayName, historyText, replyText);
     } catch (err) {
       console.error('Groq error:', err);
       if (!triggered) return null;
@@ -881,6 +917,10 @@ async function checkApis() {
   const ping = (model) => groq.chat.completions.create({ model, messages: [{ role: 'user', content: 'ตอบว่า ok' }], max_tokens: 200 });
   await check('Groq gpt-oss-120b', () => ping('openai/gpt-oss-120b'));
   await check('Groq gpt-oss-20b', () => ping('openai/gpt-oss-20b'));
+  await check('Router (gpt-oss-20b)', async () => {
+    const { route } = await routeQuestion('พรุ่งนี้เชียงใหม่ฝนตกไหม');
+    if (route !== 'weather') throw new Error(`expected weather, got ${route}`);
+  });
   await check(`Groq vision ${VISION_MODEL}`, () => groq.models.retrieve(VISION_MODEL));
   await check('Groq whisper-large-v3-turbo', () => groq.models.retrieve('whisper-large-v3-turbo'));
   await check('OpenWeather', async () => { if (!(await getWeatherReport())) throw new Error('no data'); });
