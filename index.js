@@ -375,32 +375,44 @@ route:
 location: ชื่อเมืองเป็นภาษาอังกฤษสำหรับค้นอากาศ เช่น Chiang Mai หรือ null ถ้าไม่ระบุ
 daysFromToday: 0 วันนี้/ตอนนี้, 1 พรุ่งนี้, 2 มะรืนนี้ หรือจำนวนวันจากวันนี้`;
 
+// Router chain: gpt-oss-20b, then gpt-oss-120b, then Gemini; a model "fails" on an error or unusable JSON
 async function routeQuestion(userText, history = []) {
-  const fallback = { route: 'search', location: null, daysFromToday: 0 };
-  try {
+  const messages = [
+    { role: 'system', content: `วันนี้คือ ${thaiNow()}\n${ROUTER_PROMPT}` },
+    ...history.slice(-6),
+    { role: 'user', content: userText },
+  ];
+  const groqRouter = (model) => async () => {
     const res = await groq.chat.completions.create({
-      model: 'openai/gpt-oss-20b',
-      messages: [
-        { role: 'system', content: `วันนี้คือ ${thaiNow()}\n${ROUTER_PROMPT}` },
-        ...history.slice(-6),
-        { role: 'user', content: userText },
-      ],
+      model,
+      messages,
       temperature: 0,
       reasoning_effort: 'low',
       max_tokens: 600, // reasoning tokens count toward this, so leave room beyond the short JSON
     });
-    const json = (res.choices[0].message.content || '').match(/\{[\s\S]*\}/);
-    if (!json) return fallback;
-    const parsed = JSON.parse(json[0]);
-    return {
-      route: ROUTES.includes(parsed.route) ? parsed.route : 'search',
-      location: typeof parsed.location === 'string' ? parsed.location : null,
-      daysFromToday: typeof parsed.daysFromToday === 'number' ? parsed.daysFromToday : 0,
-    };
-  } catch (err) {
-    console.error('routeQuestion failed:', err.message);
-    return fallback;
+    return res.choices[0].message.content;
+  };
+  const routers = [
+    ['gpt-oss-20b', groqRouter('openai/gpt-oss-20b')],
+    ['gpt-oss-120b', groqRouter('openai/gpt-oss-120b')],
+    ...(process.env.GEMINI_API_KEY ? [['Gemini', () => askGemini(messages, 300, 0)]] : []),
+  ];
+
+  for (const [name, ask] of routers) {
+    try {
+      const json = ((await ask()) || '').match(/\{[\s\S]*\}/);
+      const parsed = json && JSON.parse(json[0]);
+      if (!ROUTES.includes(parsed?.route)) throw new Error(`unusable answer: ${json?.[0] ?? 'no JSON'}`);
+      return {
+        route: parsed.route,
+        location: typeof parsed.location === 'string' ? parsed.location : null,
+        daysFromToday: typeof parsed.daysFromToday === 'number' ? parsed.daysFromToday : 0,
+      };
+    } catch (err) {
+      console.error(`Router ${name} failed:`, err.message);
+    }
   }
+  return { route: 'search', location: null, daysFromToday: 0 }; // every router failed: most capable route
 }
 
 async function translateToThai(text) {
