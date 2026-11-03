@@ -54,6 +54,7 @@ const ELDEST_SON_PROMPT = `คุณคือ "ชาวี" ลูกชาย�
 ข้อห้าม:
 - ห้ามรับปากเรื่องที่ทำจริงไม่ได้ เช่น จะกลับบ้าน จะไปรับ จะซื้อของไปให้ ให้ตอบแบบให้กำลังใจหรือช่วยวางแผนแทน
 - ห้ามคำหยาบ ห้ามพูดให้ใครเสียใจ
+- ชื่อคุณคือ "ชาวี" เฉยๆ ไม่มีนามสกุล ห้ามใส่นามสกุลหรือชื่อตัวเองนำหน้าข้อความ เริ่มตอบที่เนื้อหาเลย
 - ห้ามเดาหรือแต่งตัวเลข ราคา ผลกีฬา ผลหวย ข่าว หรือข้อมูลสุขภาพ/ยา ถ้าต้องใช้ข้อมูลล่าสุดให้ค้นเว็บก่อน ถ้ายังไม่แน่ใจให้บอกตรงๆ ว่าไม่แน่ใจ
 - ถ้าไม่ได้ระบุประเทศ ให้ตอบด้วยข้อมูลของประเทศไทยเสมอ เช่น ราคาทองตามสมาคมค้าทองคำเป็นบาท ราคาน้ำมันหน้าปั๊มในไทยเป็นบาทต่อลิตร ข่าว กฎหมาย วันหยุด ราคาสินค้า และค่าเงินเป็นของไทย ค้นเว็บด้วยคำค้นภาษาไทยและอ่านจากเว็บไทยเป็นหลัก ตอบข้อมูลต่างประเทศเฉพาะตอนที่ถูกถามถึง
 ${FINISH_SENTENCE_RULE}`;
@@ -106,6 +107,8 @@ const userProfiles = new Map();
 const groupIds = new Set(
   (process.env.GROUP_IDS || '').split(',').map((id) => id.trim()).filter(Boolean)
 );
+// With GROUP_IDS set, daily posts go only to those groups (other groups, e.g. a test group, still chat normally)
+const autoAddGroups = groupIds.size === 0;
 
 const app = express();
 
@@ -624,7 +627,10 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
         ...(search ? { tools: [{ type: 'browser_search' }] } : {}),
       });
       // browser_search leaves citation marks like 【2†L62-L68】
-      return message.choices[0].message.content.replace(/\s*【[^】]*】/g, '');
+      return message.choices[0].message.content
+        .replace(/\s*【[^】]*】/g, '')
+        // the model sometimes opens with a name/surname label ("อัมราภรณ์", "ชาวี:") it associates with "ชาวี"
+        .replace(/^\s*(ชาวี\s*)?(อัมราภรณ์)?\s*[:：]?\s*/, (m) => (/อัมราภรณ์|[:：]/.test(m) ? '' : m));
     } catch (err) {
       console.error(`Groq attempt ${i + 1} failed:`, err.message);
       if (i === retries - 1) {
@@ -870,12 +876,13 @@ app.post('/webhook', middleware(lineConfig), (req, res) => {
   }
 
   req.body.events.forEach((event) => {
-    if (event.source.type === 'group') {
-      groupIds.add(event.source.groupId);
-      console.log(`📍 GROUP_ID stored: ${event.source.groupId} (Total groups: ${groupIds.size})`);
-    } else if (event.source.type === 'room') {
-      groupIds.add(event.source.roomId);
-      console.log(`📍 ROOM_ID stored: ${event.source.roomId} (Total rooms: ${groupIds.size})`);
+    const id = event.source.groupId || event.source.roomId;
+    if (!id || groupIds.has(id)) return;
+    if (autoAddGroups) {
+      groupIds.add(id);
+      console.log(`📍 GROUP_ID stored: ${id} (Total groups: ${groupIds.size})`);
+    } else {
+      console.log(`📍 GROUP_ID seen (not in GROUP_IDS, no daily posts): ${id}`);
     }
   });
 
