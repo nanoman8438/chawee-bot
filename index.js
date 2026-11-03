@@ -1127,11 +1127,10 @@ function scheduleDailyContent() {
     { timezone: 'Asia/Bangkok' }
   );
 
-  // News: random time between 8:00-17:00, picked fresh each day
-  scheduleRandomDailyTask('daily news', 8, 17, sendDailyNews);
-
-  // Knowledge: random time between 8:00-17:00, picked fresh each day (independent of news)
-  scheduleRandomDailyTask('daily knowledge', 8, 17, sendDailyKnowledge);
+  // Daily news and knowledge posts are off: on LINE's free plan every push to a group counts once per member
+  // (300/month), and three posts a day ran out mid-month. Family can still ask the bot (replies are free).
+  // To bring them back: scheduleRandomDailyTask('daily news', 8, 17, sendDailyNews);
+  //                     scheduleRandomDailyTask('daily knowledge', 8, 17, sendDailyKnowledge);
 }
 
 // Render free tier spins the service down after ~15 min of no traffic,
@@ -1200,5 +1199,5 @@ app.listen(PORT, () => {
   scheduleDailyContent();
   startKeepAlive();
   setInterval(() => chatterBuffers.forEach((_, groupId) => flushChatter(groupId)), CHATTER_FLUSH_MS);
-  console.log('Daily content scheduler started (weather 8:00, news + knowledge random 8:00-17:00)');
+  console.log('Daily content scheduler started (weather 8:00 only)');
 });
