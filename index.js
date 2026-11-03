@@ -502,10 +502,23 @@ async function sendToAllGroups(message) {
   }
 }
 
+// Places in the morning report: [label shown in LINE, OpenWeather query]
+const DAILY_WEATHER_PLACES = [
+  ['กรุงเทพมหานคร', 'Bangkok,TH'],
+  ['อ.ปากเกร็ด จ.นนทบุรี', 'Pak Kret,TH'],
+  ['อ.อรัญประเทศ จ.สระแก้ว', 'Aranyaprathet,TH'],
+];
+
 async function sendDailyWeather() {
-  const weather = await getWeatherReport();
-  const message = weather
-    ? `🌤️ รายงานสภาพอากาศประจำวัน\n\n📍 กรุงเทพมหานคร\n🌡️ อุณหภูมิ: ${weather.temp}°C (รู้สึกได้ถึง ${weather.feelsLike}°C)\n☁️ สภาพอากาศ: ${weather.description}\n💧 ความชื้น: ${weather.humidity}%${weather.pm25 != null ? `\n😷 PM2.5: ${weather.pm25} µg/m³ (${pm25Label(weather.pm25)})` : ''}`
+  const reports = await Promise.all(DAILY_WEATHER_PLACES.map(([, query]) => getWeatherReport(query)));
+  const blocks = DAILY_WEATHER_PLACES.map(([label], i) => {
+    const weather = reports[i];
+    return weather
+      ? `📍 ${label}\n🌡️ อุณหภูมิ: ${weather.temp}°C (รู้สึกได้ถึง ${weather.feelsLike}°C)\n☁️ สภาพอากาศ: ${weather.description}\n💧 ความชื้น: ${weather.humidity}%${weather.pm25 != null ? `\n😷 PM2.5: ${weather.pm25} µg/m³ (${pm25Label(weather.pm25)})` : ''}`
+      : `📍 ${label}\nขณะนี้ดึงข้อมูลไม่ได้`;
+  });
+  const message = reports.some(Boolean)
+    ? `🌤️ รายงานสภาพอากาศประจำวัน\n\n${blocks.join('\n\n')}`
     : '🌤️ รายงานสภาพอากาศประจำวัน\n\nขณะนี้ไม่สามารถดึงข้อมูลสภาพอากาศได้ กรุณาตรวจสอบใหม่ภายหลัง';
   console.log(`📢 Sending weather to ${groupIds.size} group(s)...`);
   await sendToAllGroups(message);
@@ -956,6 +969,13 @@ async function checkApis() {
   await check('Groq whisper-large-v3 (backup)', () => groq.models.retrieve('whisper-large-v3'));
   await check('OpenWeather', async () => { if (!(await getWeatherReport())) throw new Error('no data'); });
   await check('Google News RSS', async () => { if (!(await getDomesticNews())) throw new Error('no Thai headlines'); });
+  for (const [label, query] of DAILY_WEATHER_PLACES) {
+    await check(`OpenWeather ${label}`, async () => {
+      const w = await getWeatherReport(query);
+      if (!w) throw new Error(`no data for ${query}`);
+      console.log(`   ${query} resolved to ${w.location}`);
+    });
+  }
   await check('OpenWeather PM2.5', async () => { if ((await getWeatherReport())?.pm25 == null) throw new Error('no PM2.5'); });
   await check(`Gemini ${GEMINI_MODEL}`, () => {
     if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set');
