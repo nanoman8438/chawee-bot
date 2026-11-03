@@ -403,7 +403,7 @@ const KNOWLEDGE_BASE = [
   { category: 'การเงิน', emoji: '🧾', text: 'กองทุน RMF และ SSF ใช้ลดหย่อนภาษีได้ แต่มีเงื่อนไขการถือครองระยะยาว ควรศึกษาก่อนตัดสินใจลงทุน' },
 
   // ความรู้รอบตัว
-  { category: 'ความรู้รอบตัว', emoji: '🌍', text: 'โลกหมุนรอบตัวเองเร็วขึ้นเรื่อยๆ ในบางปี ทำให้นักวิทยาศาสตร์ต้องเพิ่ม "อธิกวินาที" (leap second) เข้าไปในนาฬิกามาตรฐานโลก' },
+  { category: 'ความรู้รอบตัว', emoji: '🌍', text: 'โลกหมุนรอบตัวเองไม่สม่ำเสมอ ในอดีตหมุนช้าลงจนนักวิทยาศาสตร์ต้องเพิ่ม "อธิกวินาที" (leap second) เข้าไปในนาฬิกามาตรฐานโลกถึง 27 ครั้ง และมีมติจะเลิกใช้อธิกวินาทีภายในปี 2035' },
   { category: 'ความรู้รอบตัว', emoji: '🐘', text: 'ช้างเป็นสัตว์ที่หลับน้อยที่สุดในบรรดาสัตว์เลี้ยงลูกด้วยนม เฉลี่ยเพียงวันละ 2 ชั่วโมงเท่านั้น' },
   { category: 'ความรู้รอบตัว', emoji: '☕', text: 'คาเฟอีนในกาแฟใช้เวลาประมาณ 45 นาทีในการดูดซึมเข้าสู่กระแสเลือดจนเต็มที่ และอยู่ในร่างกายได้นาน 3-5 ชั่วโมง' },
   { category: 'ความรู้รอบตัว', emoji: '🌙', text: 'ดวงจันทร์กำลังเคลื่อนที่ห่างออกจากโลกปีละประมาณ 3.8 เซนติเมตร ซึ่งเท่ากับอัตราการยาวขึ้นของเล็บมือคนเรา' },
@@ -481,16 +481,16 @@ async function getWeatherReport(city = 'Bangkok,TH', daysFromToday = 0) {
     if (!res.ok) throw new Error(`OpenWeatherMap HTTP ${res.status}`);
     const data = await res.json();
 
-    const targetDate = new Date();
-    targetDate.setDate(targetDate.getDate() + daysFromToday);
-    const targetDateStr = targetDate.toISOString().split('T')[0];
+    // Forecast slots are in UTC; compare and pick them on Thai time (UTC+7) so "tomorrow" and "midday" mean Thailand's
+    const thaiIso = (ms) => new Date(ms + 7 * 60 * 60 * 1000).toISOString(); // "YYYY-MM-DDTHH:..."
+    const targetDateStr = thaiIso(Date.now() + daysFromToday * 24 * 60 * 60 * 1000).slice(0, 10);
 
-    const candidates = (data.list || []).filter((item) => item.dt_txt.startsWith(targetDateStr));
+    const candidates = (data.list || []).filter((item) => thaiIso(item.dt * 1000).startsWith(targetDateStr));
     if (candidates.length === 0) return null;
 
-    // Prefer the forecast slot closest to midday for a representative reading.
-    const noonEntry =
-      candidates.find((item) => item.dt_txt.endsWith('12:00:00')) || candidates[Math.floor(candidates.length / 2)];
+    // Prefer the slot closest to 13:00 Thai time for a representative daytime reading.
+    const hourOff = (item) => Math.abs(Number(thaiIso(item.dt * 1000).slice(11, 13)) - 13);
+    const noonEntry = candidates.reduce((best, item) => (hourOff(item) < hourOff(best) ? item : best));
 
     return {
       location: data.city?.name || city,
@@ -731,6 +731,20 @@ function toGeminiParts(content) {
   });
 }
 
+// Gemini wants the conversation to start with the user and alternate turns; our history can start with a bot
+// reply (trimmed window) or hold several family messages in a row, so merge same-role neighbours.
+function toGeminiContents(messages) {
+  const contents = [];
+  for (const m of messages) {
+    const role = m.role === 'assistant' ? 'model' : 'user';
+    if (!contents.length && role === 'model') continue;
+    const last = contents.at(-1);
+    if (last?.role === role) last.parts.push(...toGeminiParts(m.content));
+    else contents.push({ role, parts: toGeminiParts(m.content) });
+  }
+  return contents;
+}
+
 // Last resort when Groq is down; no web search (free tier has no search on Gemini 3+)
 async function askGemini(messages, maxTokens, temperature = PERSONA.temperature) {
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
@@ -738,10 +752,7 @@ async function askGemini(messages, maxTokens, temperature = PERSONA.temperature)
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: messages[0].content }] },
-      contents: messages.slice(1).map((m) => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: toGeminiParts(m.content),
-      })),
+      contents: toGeminiContents(messages.slice(1)),
       generationConfig: { maxOutputTokens: maxTokens, temperature },
     }),
   });
@@ -787,8 +798,11 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
         reasoning_effort,
         ...(search ? { tools: [{ type: 'browser_search' }] } : {}),
       });
+      const content = message.choices[0].message.content;
+      // reasoning can use up the token budget and leave no answer; LINE rejects empty text, so try the next model
+      if (!content?.trim()) throw new Error('empty reply');
       // browser_search leaves citation marks like 【2†L62-L68】
-      return message.choices[0].message.content
+      return content
         .replace(/\s*【[^】]*】/g, '')
         // the model sometimes opens with a name/surname label ("อัมราภรณ์", "ชาวี:") it associates with "ชาวี"
         .replace(/^\s*(ชาวี\s*)?(อัมราภรณ์)?\s*[:：]?\s*/, (m) => (/อัมราภรณ์|[:：]/.test(m) ? '' : m));
@@ -797,7 +811,11 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
       if (i === retries - 1) {
         if (!process.env.GEMINI_API_KEY) throw err;
         console.log('Falling back to Gemini');
-        return askGemini(messages, maxTokens);
+        // Gemini here can't search, so it must not make up live data (news, prices, results)
+        const noSearch = search
+          ? '\n\nตอนนี้คุณค้นเว็บไม่ได้ ถ้าคำถามต้องใช้ข้อมูลล่าสุด (ข่าว ราคา ผลกีฬา อากาศ) ห้ามแต่งข้อมูลขึ้นเอง ให้บอกตรงๆ ว่าตอนนี้เช็กข้อมูลล่าสุดไม่ได้ (ถ้าคำสั่งบอกให้ตอบ NONE เมื่อหาไม่เจอ ให้ตอบ NONE)'
+          : '';
+        return askGemini([{ ...messages[0], content: messages[0].content + noSearch }, ...messages.slice(1)], maxTokens);
       }
       if (NON_RETRYABLE.includes(err.status)) {
         i = retries - 2; // skip straight to the 20b attempt, no waiting
@@ -1165,7 +1183,7 @@ async function checkApis() {
   await check('OpenWeather PM2.5', async () => { if ((await getWeatherReport())?.pm25 == null) throw new Error('no PM2.5'); });
   await check('Upstash notes', async () => {
     if (!hasNotesStore()) throw new Error('UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN not set (notes kept in memory only)');
-    await loadNotes();
+    await redis(['PING']);
   });
   await check(`Gemini ${GEMINI_MODEL}`, () => {
     if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set');
@@ -1175,7 +1193,10 @@ async function checkApis() {
 
 app.listen(PORT, () => {
   console.log(`Chawee bot listening on port ${PORT}`);
-  checkApis();
+  // load notes before anything can learn, then run the (slower) API checks
+  loadNotes()
+    .catch((err) => console.error('loadNotes failed:', err.message))
+    .finally(checkApis);
   scheduleDailyContent();
   startKeepAlive();
   setInterval(() => chatterBuffers.forEach((_, groupId) => flushChatter(groupId)), CHATTER_FLUSH_MS);
