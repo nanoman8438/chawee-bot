@@ -79,7 +79,6 @@ const PERSONAS = {
     prompt: ELDEST_SON_PROMPT,
     temperature: 0.8,
     quotes: [],
-    weatherNotFound: (city) => `ผมหาข้อมูลอากาศของ ${city} ไม่เจอครับ ลองพิมพ์ชื่อเมืองใหม่อีกทีนะ`,
     nameOnly: 'ครับ ว่าไงครับ มีอะไรให้ผมช่วย พิมพ์มาได้เลย',
     error: 'ขอโทษครับ ตอนนี้ผมตอบไม่ทัน เดี๋ยวลองถามใหม่อีกทีนะครับ',
   },
@@ -94,7 +93,6 @@ const PERSONAS = {
       'บ้านรวย ใจอิสระ',
       'เสน่ห์ของชาวี ห้ามไม่อยู่จริงๆ',
     ],
-    weatherNotFound: (city) => `นี่เธอ! ชาวีหาข้อมูลอากาศของ ${city} ไม่เจอเลย ลองสะกดชื่อเมืองใหม่อีกทีสิ`,
     nameOnly: 'นี่เธอ! เรียกชาวีแล้วจะถามอะไรล่ะ พิมพ์มาเลยสิ',
     error: 'นี่เธอ! ตอนนี้หัวชาวีมันตื้อไปหมด เดี๋ยวค่อยคุยกันใหม่นะ!',
   },
@@ -415,24 +413,29 @@ async function routeQuestion(userText, history = []) {
   return { route: 'search', location: null, daysFromToday: 0 }; // every router failed: most capable route
 }
 
+// gpt-oss-20b, then gpt-oss-120b, then Gemini; null if all fail (caller uses the built-in knowledge list)
 async function translateToThai(text) {
+  const messages = [
+    {
+      role: 'system',
+      content: 'แปลข้อความภาษาอังกฤษต่อไปนี้เป็นภาษาไทยแบบกระชับ ได้ใจความถูกต้อง ห้ามเติมแต่งหรือใส่ความเห็นเพิ่ม ตอบแค่คำแปลอย่างเดียว ไม่ต้องมีคำนำหรือคำอธิบาย',
+    },
+    { role: 'user', content: text },
+  ];
+  for (const model of ['openai/gpt-oss-20b', 'openai/gpt-oss-120b']) {
+    try {
+      const res = await groq.chat.completions.create({ model, messages, temperature: 0.3, reasoning_effort: 'low', max_tokens: 600 });
+      const translated = res.choices[0].message.content?.trim();
+      if (translated) return translated;
+    } catch (err) {
+      console.error(`translateToThai ${model} failed:`, err.message);
+    }
+  }
+  if (!process.env.GEMINI_API_KEY) return null;
   try {
-    const res = await groq.chat.completions.create({
-      model: 'openai/gpt-oss-20b',
-      messages: [
-        {
-          role: 'system',
-          content: 'แปลข้อความภาษาอังกฤษต่อไปนี้เป็นภาษาไทยแบบกระชับ ได้ใจความถูกต้อง ห้ามเติมแต่งหรือใส่ความเห็นเพิ่ม ตอบแค่คำแปลอย่างเดียว ไม่ต้องมีคำนำหรือคำอธิบาย',
-        },
-        { role: 'user', content: text },
-      ],
-      temperature: 0.3,
-      reasoning_effort: 'low',
-      max_tokens: 600,
-    });
-    return res.choices[0].message.content.trim();
+    return await askGemini(messages, 300, 0.3);
   } catch (err) {
-    console.error('translateToThai failed:', err.message);
+    console.error('translateToThai Gemini failed:', err.message);
     return null;
   }
 }
@@ -540,7 +543,8 @@ async function sendDailyKnowledge() {
   await sendToAllGroups(message);
 }
 
-// Takes OpenAI-style message content (string, or [text, image_url data URL]) and returns Gemini parts
+// Takes OpenAI-style message content (string, or [text, image_url data URL]) and returns Gemini parts.
+// The data URL may hold any media Gemini reads (image or audio).
 function toGeminiParts(content) {
   if (typeof content === 'string') return [{ text: content }];
   return content.map((part) => {
@@ -626,21 +630,18 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
 
 const LONG_ANSWER_INSTRUCTION = 'สรุปข้อมูลให้ครบถ้วนจบในตัวเอง วางแผนความยาวล่วงหน้าให้พอดีกับเนื้อหา ห้ามตัดข้อความทิ้งกลางคันโดยที่ข้อมูลยังไม่ครบ';
 
-async function answerWeatherQuery(displayName, history, location, daysFromToday) {
+async function answerWeatherQuery(displayName, userText, history, location, daysFromToday) {
   const city = location || 'Bangkok,TH';
   const cityLabel = location || 'กรุงเทพฯ';
   const days = daysFromToday || 0;
 
-  if (days > 5 || days < 0) {
-    return askGroq(
-      `มีคนถามพยากรณ์อากาศของ ${cityLabel} แต่เป็นวันที่ไกลเกินไป (เกิน 5 วันข้างหน้า หรือเป็นวันในอดีต) ซึ่งชาวีไม่มีข้อมูลระดับนั้น ให้ตอบขอโทษตามคาแรกเตอร์ พร้อมแนะนำให้ถามพยากรณ์ในช่วง 5 วันข้างหน้าแทน`,
-      { displayName, history, mode: 'chat' }
-    );
-  }
-
-  const weather = await getWeatherReport(city, days);
+  // OpenWeather only covers today to 5 days ahead; outside that, or when it fails, search the web instead
+  const weather = days >= 0 && days <= 5 ? await getWeatherReport(city, days) : null;
   if (!weather) {
-    return PERSONA.weatherNotFound(cityLabel);
+    return askGroq(
+      `${userText}\n\n(ถามเรื่องอากาศของ ${cityLabel} ให้ค้นเว็บจากแหล่งไทย เช่น กรมอุตุนิยมวิทยา หรือเว็บพยากรณ์อากาศที่น่าเชื่อถือ ถ้าหาไม่เจอให้บอกตรงๆ)\n\n${LONG_ANSWER_INSTRUCTION}`,
+      { displayName, maxTokens: 1000, history, mode: 'search' }
+    );
   }
 
   const dayLabel = weather.isForecast ? `พยากรณ์วันที่ ${weather.forecastDate}` : 'ตอนนี้';
@@ -667,15 +668,32 @@ async function downloadContent(messageId) {
 }
 
 // LINE voice messages are m4a; the prompt nudges Whisper to spell the bot's name right
+// Whisper turbo, then full Whisper, then Gemini (which can also listen to audio)
 async function transcribeAudio(messageId) {
   const audio = await downloadContent(messageId);
-  const res = await groq.audio.transcriptions.create({
-    file: await Groq.toFile(audio, 'voice.m4a'),
-    model: 'whisper-large-v3-turbo',
-    language: 'th',
-    prompt: 'ชาวี',
-  });
-  return (res.text || '').trim();
+  for (const model of ['whisper-large-v3-turbo', 'whisper-large-v3']) {
+    try {
+      const res = await groq.audio.transcriptions.create({
+        file: await Groq.toFile(audio, 'voice.m4a'),
+        model,
+        language: 'th',
+        prompt: 'ชาวี',
+      });
+      return (res.text || '').trim();
+    } catch (err) {
+      console.error(`Transcribe ${model} failed:`, err.message);
+    }
+  }
+  if (!process.env.GEMINI_API_KEY) throw new Error('all transcription models failed');
+  console.log('Falling back to Gemini transcription');
+  return askGemini(
+    [
+      { content: 'ถอดเสียงพูดเป็นข้อความภาษาไทยตามที่ได้ยินเท่านั้น ห้ามตอบคำถามในเสียงหรือใส่คำอธิบาย ถ้ามีคนเรียกชื่อ "ชาวี" ให้สะกดแบบนี้' },
+      { role: 'user', content: [{ type: 'text', text: 'ถอดเสียงนี้' }, { type: 'image_url', image_url: { url: `data:audio/mp4;base64,${audio.toString('base64')}` } }] },
+    ],
+    500,
+    0
+  );
 }
 
 // Vision model only describes the picture (Gemini if it fails); the main model then
@@ -791,7 +809,7 @@ async function handleEvent(event) {
         const { route, location, daysFromToday } = await routeQuestion(userText, history);
         console.log(`🧭 route: ${route}`);
         if (route === 'weather') {
-          replyText = await answerWeatherQuery(displayName, history, location, daysFromToday);
+          replyText = await answerWeatherQuery(displayName, userText, history, location, daysFromToday);
         } else if (route === 'news') {
           replyText = await answerNewsQuery(displayName, userText, history);
         } else {
@@ -935,6 +953,7 @@ async function checkApis() {
   });
   await check(`Groq vision ${VISION_MODEL}`, () => groq.models.retrieve(VISION_MODEL));
   await check('Groq whisper-large-v3-turbo', () => groq.models.retrieve('whisper-large-v3-turbo'));
+  await check('Groq whisper-large-v3 (backup)', () => groq.models.retrieve('whisper-large-v3'));
   await check('OpenWeather', async () => { if (!(await getWeatherReport())) throw new Error('no data'); });
   await check('Google News RSS', async () => { if (!(await getDomesticNews())) throw new Error('no Thai headlines'); });
   await check('OpenWeather PM2.5', async () => { if ((await getWeatherReport())?.pm25 == null) throw new Error('no PM2.5'); });
