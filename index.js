@@ -136,6 +136,27 @@ const recentMessages = new Map();
 const awaitingQuestion = new Map();
 const recentImages = new Map();
 
+// Texts by LINE message ID (ours and the family's), so a LINE "reply" (quotedMessageId) can be resolved.
+// ponytail: in-memory, lost on restart; a quote we don't know just falls back to chat history
+const QUOTE_MS = 24 * 60 * 60 * 1000;
+const messageTexts = new Map();
+
+function rememberQuotable(id, userId, text) {
+  if (id && text) messageTexts.set(id, { userId, text, at: Date.now() });
+}
+
+function quotedNote(quotedMessageId) {
+  const quoted = messageTexts.get(quotedMessageId);
+  if (!quoted) return '';
+  const who = quoted.userId ? userProfiles.get(quoted.userId) || 'คนในกลุ่ม' : 'ชาวี (คุณเอง)';
+  return `[กดตอบกลับข้อความของ ${who}: "${quoted.text.slice(0, 500)}"]
+`;
+}
+
+function rememberSent(response, text) {
+  for (const { id } of response?.sentMessages || []) rememberQuotable(id, null, text);
+}
+
 function takeRecentImage(key) {
   const image = recentImages.get(key);
   recentImages.delete(key);
@@ -149,6 +170,10 @@ function memoryKey(event) {
 
 // ponytail: full sweep per event, fine for a few groups; switch to setInterval sweep if traffic grows
 function pruneMemory() {
+  const quoteCutoff = Date.now() - QUOTE_MS;
+  for (const [id, { at }] of messageTexts) {
+    if (at < quoteCutoff) messageTexts.delete(id);
+  }
   const cutoff = Date.now() - MEMORY_MS;
   for (const [key, list] of recentMessages) {
     const fresh = list.filter((m) => m.at >= cutoff);
@@ -494,10 +519,7 @@ async function sendToAllGroups(message) {
 
   for (const groupId of groupIds) {
     try {
-      await lineClient.pushMessage(groupId, {
-        type: 'text',
-        text: message,
-      });
+      rememberSent(await lineClient.pushMessage(groupId, { type: 'text', text: message }), message);
       console.log(`✅ Sent to: ${groupId}`);
     } catch (err) {
       console.error(`❌ Failed to send to ${groupId}:`, err.message);
@@ -761,7 +783,10 @@ async function handleEvent(event) {
     }
     if (!userText) return null;
   }
-  let triggered = !isImage && isTriggered(userText);
+  rememberQuotable(event.message.id, event.source.userId, userText);
+  const quote = event.message.quotedMessageId ? quotedNote(event.message.quotedMessageId) : '';
+  // replying to one of the bot's own messages counts as talking to the bot
+  let triggered = !isImage && (isTriggered(userText) || messageTexts.get(event.message.quotedMessageId)?.userId === null);
   let replyText = null;
   let fromMemory = false;
   let imageId = null;
@@ -780,7 +805,7 @@ async function handleEvent(event) {
     fromMemory = true;
   } else if (key) {
     pruneMemory();
-    if (triggered && isNameOnly(userText)) {
+    if (triggered && isNameOnly(userText) && !quote) {
       const recent = takeRecentMessages(key);
       imageId = takeRecentImage(key);
       if (recent.length || imageId) {
@@ -805,6 +830,8 @@ async function handleEvent(event) {
     if (key) rememberMessage(key, userText);
     return null;
   }
+
+  userText = quote + userText;
 
   if (replyText !== null) {
     // name-only call with nothing to answer yet
@@ -845,19 +872,23 @@ async function handleEvent(event) {
   }
 
   try {
-    return await lineClient.replyMessage(event.replyToken, {
+    const response = await lineClient.replyMessage(event.replyToken, {
       type: 'text',
       text: replyText,
     });
+    rememberSent(response, replyText);
+    return response;
   } catch (err) {
     console.error('replyMessage failed, falling back to push:', err.message);
     const target = event.source.groupId || event.source.roomId || event.source.userId;
     if (!target) return null;
     try {
-      return await lineClient.pushMessage(target, {
+      const response = await lineClient.pushMessage(target, {
         type: 'text',
         text: replyText,
       });
+      rememberSent(response, replyText);
+      return response;
     } catch (pushErr) {
       console.error('pushMessage fallback also failed:', pushErr.message);
       return null;
