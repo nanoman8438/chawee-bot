@@ -511,7 +511,8 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
   for (let i = 0; i < retries; i++) {
     try {
       const message = await groq.chat.completions.create({
-        model: imageDataUrl ? VISION_MODEL : 'openai/gpt-oss-120b',
+        // last retry falls back to the smaller model in case 120b is down or rate-limited
+        model: imageDataUrl ? VISION_MODEL : i === retries - 1 ? 'openai/gpt-oss-20b' : 'openai/gpt-oss-120b',
         messages: [
           { role: 'system', content: `${PERSONA.prompt}\n\nตอนนี้คือ ${thaiNow()} (เวลาประเทศไทย)` },
           ...history,
@@ -576,11 +577,27 @@ async function answerNewsQuery(displayName, userText, history = []) {
   );
 }
 
-async function answerImage(messageId, question, displayName, history) {
+async function downloadContent(messageId) {
   const stream = await lineClient.getMessageContent(messageId);
   const chunks = [];
   for await (const chunk of stream) chunks.push(chunk);
-  const image = Buffer.concat(chunks);
+  return Buffer.concat(chunks);
+}
+
+// LINE voice messages are m4a; the prompt nudges Whisper to spell the bot's name right
+async function transcribeAudio(messageId) {
+  const audio = await downloadContent(messageId);
+  const res = await groq.audio.transcriptions.create({
+    file: await Groq.toFile(audio, 'voice.m4a'),
+    model: 'whisper-large-v3-turbo',
+    language: 'th',
+    prompt: 'ชาวี',
+  });
+  return (res.text || '').trim();
+}
+
+async function answerImage(messageId, question, displayName, history) {
+  const image = await downloadContent(messageId);
   if (image.length > MAX_IMAGE_BYTES) throw new Error(`image too large: ${image.length} bytes`);
   return askGroq(`${question || 'ช่วยดูรูปนี้ให้หน่อย'}\n\n(มีรูปภาพแนบมา ให้ดูรูปแล้วตอบตามคาแรกเตอร์)`, {
     displayName,
@@ -593,9 +610,20 @@ async function answerImage(messageId, question, displayName, history) {
 async function handleEvent(event) {
   if (event.type !== 'message') return null;
   const isImage = event.message.type === 'image';
-  if (!isImage && event.message.type !== 'text') return null;
+  const isAudio = event.message.type === 'audio';
+  if (!isImage && !isAudio && event.message.type !== 'text') return null;
 
+  // voice messages become text and then follow the same rules as typed messages
   let userText = isImage ? '' : event.message.text;
+  if (isAudio) {
+    try {
+      userText = await transcribeAudio(event.message.id);
+    } catch (err) {
+      console.error('transcribeAudio failed:', err.message);
+      return null;
+    }
+    if (!userText) return null;
+  }
   let triggered = !isImage && isTriggered(userText);
   let replyText = null;
   let fromMemory = false;
