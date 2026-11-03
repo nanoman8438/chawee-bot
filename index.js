@@ -204,7 +204,7 @@ function pruneMemory() {
 }
 
 const HISTORY_MS = 60 * 60 * 1000;
-const HISTORY_MAX_MESSAGES = 20;
+const HISTORY_MAX_MESSAGES = 30; // includes family chat the bot wasn't called into
 const HISTORY_BOT_REPLY_CHARS = 800;
 const chatHistory = new Map();
 
@@ -263,18 +263,43 @@ const LEARN_PROMPT = `คุณคือผู้จดสมุดบันท�
 ${FAMILY_SECTION}
 จดเฉพาะสิ่งที่ช่วยให้คุยและช่วยเหลือกันดีขึ้นในอนาคต เช่น ความสนใจ งานอดิเรก ของที่ชอบ/ไม่ชอบ อาหารที่แพ้ กิจวัตร แผนสำคัญ หรือเรื่องที่มีคนสั่งว่า "จำไว้"
 ห้ามจด: คำถามทั่วไปครั้งเดียว (เช่น ถามราคาทองครั้งเดียว) ข่าว รหัสผ่าน เลขบัญชี เลขบัตร ที่อยู่ละเอียด หรือสิ่งที่เดาเอาเอง
+ห้ามจดเรื่องทะเลาะ นินทา เรื่องเงินทองหรือหนี้สิน และเรื่องที่มีคนบอกว่า "ไม่ต้องจำ" หรือ "อย่าจำ"
+จดเฉพาะเรื่องที่ชัดเจนว่าเป็นของใคร ถ้าไม่แน่ใจว่าพูดถึงใคร (เช่น "ปวดหัว" แต่ไม่รู้ว่าใครปวด) ให้ข้าม
 ถ้ามีคนสั่งให้ลืม หรือข้อมูลเดิมไม่จริงแล้ว ให้ลบโน้ตนั้น
 who ใช้ชื่อเรียกในบ้าน (พ่อ แม่ นิว ดรีม ยาย) ถ้าเป็นคนอื่นใช้ชื่อ LINE โน้ตแต่ละข้อสั้นๆ ไม่เกิน 15 คำ และอย่าจดซ้ำกับที่มีอยู่แล้ว
 ตอบเป็น JSON เท่านั้น: {"add":[{"who":"...","note":"..."}],"remove":[{"who":"...","note":"<ข้อความโน้ตเดิมตรงตัว>"}]} ถ้าไม่มีอะไรให้ตอบ {"add":[],"remove":[]}`;
 
 // Runs after a reply is sent; never blocks or breaks the chat
 async function learnFromExchange(displayName, userText, botReply) {
+  await learnFromConversation(`[${displayName || 'ไม่ทราบชื่อ'}]: ${userText}\n[ชาวี]: ${botReply}`);
+}
+
+// Family chat the bot wasn't called into: buffered per group and learned from in batches
+// (every CHATTER_BATCH messages or CHATTER_FLUSH_MS), so it costs a few model calls a day, not one per message.
+const CHATTER_BATCH = 25;
+const CHATTER_FLUSH_MS = 30 * 60 * 1000;
+const chatterBuffers = new Map(); // groupId -> ["[name]: text", ...]
+
+function bufferChatter(groupId, displayName, text) {
+  const lines = chatterBuffers.get(groupId) || [];
+  lines.push(`[${displayName || 'ไม่ทราบชื่อ'}]: ${text}`);
+  chatterBuffers.set(groupId, lines);
+  if (lines.length >= CHATTER_BATCH) flushChatter(groupId);
+}
+
+function flushChatter(groupId) {
+  const lines = chatterBuffers.get(groupId);
+  if (!lines?.length) return;
+  chatterBuffers.delete(groupId);
+  learnFromConversation(`(แชทในกลุ่มที่คนในบ้านคุยกันเอง ไม่ได้คุยกับชาวี)\n${lines.join('\n')}`).catch((err) =>
+    console.error('learn from chatter failed:', err.message)
+  );
+}
+
+async function learnFromConversation(conversation) {
   const messages = [
     { role: 'system', content: LEARN_PROMPT },
-    {
-      role: 'user',
-      content: `โน้ตที่มีอยู่: ${JSON.stringify(familyNotes)}\n\n[${displayName || 'ไม่ทราบชื่อ'}]: ${userText}\n[ชาวี]: ${botReply}`,
-    },
+    { role: 'user', content: `โน้ตที่มีอยู่: ${JSON.stringify(familyNotes)}\n\n${conversation}` },
   ];
   const text = await askSmallModel(messages, 800);
   const json = text && text.match(/\{[\s\S]*\}/);
@@ -296,6 +321,19 @@ async function learnFromExchange(displayName, userText, botReply) {
   if (!changed) return;
   console.log(`📒 notes updated: +${add.length} -${remove.length}`);
   if (hasNotesStore()) await redis(['SET', NOTES_KEY, JSON.stringify(familyNotes)]);
+}
+
+// Family chat that wasn't for the bot: kept in history so the bot knows what was being discussed when called
+function appendChatter(key, displayName, text) {
+  const list = chatHistory.get(key) || [];
+  list.push({ role: 'user', content: `${namePrefix(displayName)}${text}`, at: Date.now(), chatter: text });
+  chatHistory.set(key, list.slice(-HISTORY_MAX_MESSAGES));
+}
+
+// When a name-only call answers remembered messages, drop them from chatter so the question isn't in history twice
+function dropChatter(key, texts) {
+  const list = chatHistory.get(key);
+  if (list) chatHistory.set(key, list.filter((m) => !texts.includes(m.chatter)));
 }
 
 function appendHistory(key, displayName, userText, botReply) {
@@ -910,6 +948,7 @@ async function handleEvent(event) {
       const recent = takeRecentMessages(key);
       imageId = takeRecentImage(key);
       if (recent.length || imageId) {
+        dropChatter(chatKey(event), recent);
         userText = recent.join('\n');
         fromMemory = true;
       } else {
@@ -929,6 +968,13 @@ async function handleEvent(event) {
 
   if (!triggered && Math.random() >= RANDOM_REPLY_RATE) {
     if (key) rememberMessage(key, userText);
+    if (!isImage && userText) {
+      const displayName = await getDisplayName(event).catch(() => null);
+      const historyKey = chatKey(event);
+      if (historyKey) appendChatter(historyKey, displayName, userText);
+      // only family groups teach the notebook (not test groups or private chats)
+      if (event.source.groupId && groupIds.has(event.source.groupId)) bufferChatter(event.source.groupId, displayName, userText);
+    }
     return null;
   }
 
@@ -1132,5 +1178,6 @@ app.listen(PORT, () => {
   checkApis();
   scheduleDailyContent();
   startKeepAlive();
+  setInterval(() => chatterBuffers.forEach((_, groupId) => flushChatter(groupId)), CHATTER_FLUSH_MS);
   console.log('Daily content scheduler started (weather 8:00, news + knowledge random 8:00-17:00)');
 });
