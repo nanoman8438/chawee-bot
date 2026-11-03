@@ -13,6 +13,7 @@ const lineConfig = {
 
 const RANDOM_REPLY_RATE = 0.1;
 const VISION_MODEL = process.env.VISION_MODEL || 'qwen/qwen3.8-27b';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // Groq caps base64 images at 4MB, and base64 adds ~33%
 
 const FINISH_SENTENCE_RULE = '- สำคัญมาก: ต้องพูดให้จบประโยคและจบความคิดในตัวเองเสมอ ห้ามตัดจบกลางคัน ห้ามทิ้งท้ายค้างคาแบบยังไม่จบเรื่อง ให้วางแผนความยาวคำตอบล่วงหน้าแล้วพูดให้ครบตามที่วางแผนไว้พอดี';
@@ -497,6 +498,27 @@ async function sendDailyKnowledge() {
   await sendToAllGroups(message);
 }
 
+// Last resort when Groq is down: text only, no web search (free tier has no search on Gemini 3+)
+async function askGemini(messages, maxTokens) {
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: messages[0].content }] },
+      contents: messages.slice(1).map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: typeof m.content === 'string' ? m.content : m.content[0].text }],
+      })),
+      generationConfig: { maxOutputTokens: maxTokens, temperature: PERSONA.temperature },
+    }),
+  });
+  if (!res.ok) throw new Error(`Gemini HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim();
+  if (!text) throw new Error('Gemini returned no text');
+  return text;
+}
+
 async function askGroq(userText, { isRandom = false, displayName = null, maxTokens: maxTokensOverride = null, history = [], imageDataUrl = null } = {}, retries = 3) {
   const prefix = namePrefix(displayName);
   const text = isRandom
@@ -507,17 +529,18 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
     : text;
 
   const maxTokens = maxTokensOverride ?? (Math.random() < 0.5 ? 300 : 550);
+  const messages = [
+    { role: 'system', content: `${PERSONA.prompt}\n\nตอนนี้คือ ${thaiNow()} (เวลาประเทศไทย)` },
+    ...history,
+    { role: 'user', content: userContent },
+  ];
 
   for (let i = 0; i < retries; i++) {
     try {
       const message = await groq.chat.completions.create({
         // last retry falls back to the smaller model in case 120b is down or rate-limited
         model: imageDataUrl ? VISION_MODEL : i === retries - 1 ? 'openai/gpt-oss-20b' : 'openai/gpt-oss-120b',
-        messages: [
-          { role: 'system', content: `${PERSONA.prompt}\n\nตอนนี้คือ ${thaiNow()} (เวลาประเทศไทย)` },
-          ...history,
-          { role: 'user', content: userContent },
-        ],
+        messages,
         temperature: PERSONA.temperature,
         // gpt-oss counts reasoning and search results toward max_tokens, so give it headroom
         ...(imageDataUrl
@@ -528,7 +551,11 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
       return message.choices[0].message.content.replace(/\s*【[^】]*】/g, '');
     } catch (err) {
       console.error(`Groq attempt ${i + 1} failed:`, err.message);
-      if (i === retries - 1) throw err;
+      if (i === retries - 1) {
+        if (!process.env.GEMINI_API_KEY || imageDataUrl) throw err;
+        console.log('Falling back to Gemini');
+        return askGemini(messages, maxTokens);
+      }
       await new Promise((resolve) => setTimeout(resolve, 2000 * (i + 1)));
     }
   }
@@ -817,8 +844,32 @@ function startKeepAlive() {
 }
 
 const PORT = process.env.PORT || 3000;
+// Startup self-check: one tiny call per API, results go to the Render logs
+async function checkApis() {
+  const check = async (name, fn) => {
+    try {
+      await fn();
+      console.log(`✅ API ok: ${name}`);
+    } catch (err) {
+      console.error(`❌ API failed: ${name}: ${err.message}`);
+    }
+  };
+  const ping = (model) => groq.chat.completions.create({ model, messages: [{ role: 'user', content: 'ตอบว่า ok' }], max_tokens: 200 });
+  await check('Groq gpt-oss-120b', () => ping('openai/gpt-oss-120b'));
+  await check('Groq gpt-oss-20b', () => ping('openai/gpt-oss-20b'));
+  await check(`Groq vision ${VISION_MODEL}`, () => groq.models.retrieve(VISION_MODEL));
+  await check('Groq whisper-large-v3-turbo', () => groq.models.retrieve('whisper-large-v3-turbo'));
+  await check('OpenWeather', async () => { if (!(await getWeatherReport())) throw new Error('no data'); });
+  await check('NewsAPI', async () => { if (!(await getDomesticNews())) throw new Error('no Thai headlines'); });
+  await check(`Gemini ${GEMINI_MODEL}`, () => {
+    if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set');
+    return askGemini([{ content: 'ตอบสั้นๆ' }, { role: 'user', content: 'ตอบว่า ok' }], 50);
+  });
+}
+
 app.listen(PORT, () => {
   console.log(`Chawee bot listening on port ${PORT}`);
+  checkApis();
   scheduleDailyContent();
   startKeepAlive();
   console.log('Daily content scheduler started (weather 8:00, news + knowledge random 8:00-17:00)');
