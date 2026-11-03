@@ -287,6 +287,30 @@ function pickRandomKnowledge() {
   return KNOWLEDGE_BASE[Math.floor(Math.random() * KNOWLEDGE_BASE.length)];
 }
 
+// Current PM2.5 (µg/m³) from OpenWeather's Air Pollution API, same key; null if unavailable
+async function getPm25(coord) {
+  try {
+    const res = await fetch(
+      `https://api.openweathermap.org/data/2.5/air_pollution?lat=${coord.lat}&lon=${coord.lon}&appid=${process.env.OPENWEATHER_API_KEY}`
+    );
+    if (!res.ok) throw new Error(`Air Pollution HTTP ${res.status}`);
+    const pm25 = (await res.json()).list?.[0]?.components?.pm2_5;
+    return pm25 == null ? null : Math.round(pm25);
+  } catch (err) {
+    console.error('getPm25 failed:', err.message);
+    return null;
+  }
+}
+
+// Thai PCD bands for 24h PM2.5 (µg/m³)
+function pm25Label(pm25) {
+  if (pm25 <= 15) return 'ดีมาก 🔵';
+  if (pm25 <= 25) return 'ดี 🟢';
+  if (pm25 <= 37.5) return 'ปานกลาง 🟡';
+  if (pm25 <= 75) return 'เริ่มมีผลต่อสุขภาพ 🟠';
+  return 'มีผลต่อสุขภาพ 🔴';
+}
+
 async function getWeatherReport(city = 'Bangkok,TH', daysFromToday = 0) {
   const apiKey = process.env.OPENWEATHER_API_KEY;
   if (!apiKey) return null;
@@ -304,6 +328,7 @@ async function getWeatherReport(city = 'Bangkok,TH', daysFromToday = 0) {
         feelsLike: Math.round(data.main.feels_like),
         description: data.weather[0].description,
         humidity: data.main.humidity,
+        pm25: await getPm25(data.coord),
         isForecast: false,
       };
     }
@@ -350,7 +375,7 @@ async function extractWeatherQuery(userText, history = []) {
           role: 'system',
           content:
             `วันนี้คือ ${thaiNow()} ` +
-            'แยกข้อมูลจากข้อความล่าสุดเรื่องสภาพอากาศ (ใช้บทสนทนาก่อนหน้าช่วยตีความ เช่น "แล้วเชียงใหม่ล่ะ" หลังคุยเรื่องอากาศ) ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกเหนือจาก JSON รูปแบบ: {"isWeather": <true ถ้าข้อความล่าสุดถามเรื่องสภาพอากาศ, false ถ้าเปลี่ยนเรื่องหรือแค่คุยเล่น>, "location": "<ชื่อเมือง/ประเทศเป็นภาษาอังกฤษสำหรับค้นหาสภาพอากาศ เช่น Tokyo, Chiang Mai, Paris, หรือ null ถ้าไม่ได้ระบุสถานที่>", "daysFromToday": <0 ถ้าถามวันนี้/ตอนนี้, 1 ถ้าพรุ่งนี้, 2 ถ้ามะรืนนี้ หรือจำนวนวันจากวันนี้ถ้าระบุวันที่อื่น (คำนวณเทียบกับวันนี้), หรือ 0 ถ้าไม่ได้ระบุวัน>}',
+            'แยกข้อมูลจากข้อความล่าสุดเรื่องสภาพอากาศ (ใช้บทสนทนาก่อนหน้าช่วยตีความ เช่น "แล้วเชียงใหม่ล่ะ" หลังคุยเรื่องอากาศ) ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกเหนือจาก JSON รูปแบบ: {"isWeather": <true ถ้าข้อความล่าสุดถามเรื่องสภาพอากาศหรือฝุ่น PM2.5, false ถ้าเปลี่ยนเรื่องหรือแค่คุยเล่น>, "location": "<ชื่อเมือง/ประเทศเป็นภาษาอังกฤษสำหรับค้นหาสภาพอากาศ เช่น Tokyo, Chiang Mai, Paris, หรือ null ถ้าไม่ได้ระบุสถานที่>", "daysFromToday": <0 ถ้าถามวันนี้/ตอนนี้, 1 ถ้าพรุ่งนี้, 2 ถ้ามะรืนนี้ หรือจำนวนวันจากวันนี้ถ้าระบุวันที่อื่น (คำนวณเทียบกับวันนี้), หรือ 0 ถ้าไม่ได้ระบุวัน>}',
         },
         ...history,
         { role: 'user', content: userText },
@@ -394,20 +419,19 @@ async function translateToThai(text) {
   }
 }
 
+// Google News Thailand RSS: free, no key, headlines from Thai outlets
 async function getDomesticNews() {
-  const apiKey = process.env.NEWSAPI_KEY;
-  if (!apiKey) return null;
-
   try {
-    const res = await fetch(
-      `https://newsapi.org/v2/top-headlines?country=th&pageSize=10&apiKey=${apiKey}`
-    );
-    if (!res.ok) throw new Error(`NewsAPI HTTP ${res.status}`);
-    const data = await res.json();
-    const articles = (data.articles || []).filter((a) => a.title && a.title !== '[Removed]');
-    if (articles.length === 0) return null;
-    const article = articles[Math.floor(Math.random() * articles.length)];
-    return { title: article.title, source: article.source?.name || 'ข่าว' };
+    const res = await fetch('https://news.google.com/rss?hl=th&gl=TH&ceid=TH:th');
+    if (!res.ok) throw new Error(`Google News HTTP ${res.status}`);
+    const xml = await res.text();
+    const unescape = (s) => s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
+    const items = [...xml.matchAll(/<item>[\s\S]*?<title>([\s\S]*?)<\/title>[\s\S]*?<source[^>]*>([\s\S]*?)<\/source>/g)]
+      .map(([, title, source]) => ({ title: unescape(title), source: unescape(source) }))
+      .map(({ title, source }) => ({ title: title.replace(new RegExp(`\\s*-\\s*${source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`), ''), source }))
+      .slice(0, 10);
+    if (items.length === 0) return null;
+    return items[Math.floor(Math.random() * items.length)];
   } catch (err) {
     console.error('getDomesticNews failed:', err.message);
     return null;
@@ -460,7 +484,7 @@ async function sendToAllGroups(message) {
 async function sendDailyWeather() {
   const weather = await getWeatherReport();
   const message = weather
-    ? `🌤️ รายงานสภาพอากาศประจำวัน\n\n📍 กรุงเทพมหานคร\n🌡️ อุณหภูมิ: ${weather.temp}°C (รู้สึกได้ถึง ${weather.feelsLike}°C)\n☁️ สภาพอากาศ: ${weather.description}\n💧 ความชื้น: ${weather.humidity}%`
+    ? `🌤️ รายงานสภาพอากาศประจำวัน\n\n📍 กรุงเทพมหานคร\n🌡️ อุณหภูมิ: ${weather.temp}°C (รู้สึกได้ถึง ${weather.feelsLike}°C)\n☁️ สภาพอากาศ: ${weather.description}\n💧 ความชื้น: ${weather.humidity}%${weather.pm25 != null ? `\n😷 PM2.5: ${weather.pm25} µg/m³ (${pm25Label(weather.pm25)})` : ''}`
     : '🌤️ รายงานสภาพอากาศประจำวัน\n\nขณะนี้ไม่สามารถดึงข้อมูลสภาพอากาศได้ กรุณาตรวจสอบใหม่ภายหลัง';
   console.log(`📢 Sending weather to ${groupIds.size} group(s)...`);
   await sendToAllGroups(message);
@@ -562,7 +586,7 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
 }
 
 function detectIntent(text) {
-  if (/สภาพอากาศ|อากาศ(เป็นไง|วันนี้|ตอนนี้)?|ฝนตก|ร้อนไหม|weather/i.test(text)) return 'weather';
+  if (/สภาพอากาศ|อากาศ(เป็นไง|วันนี้|ตอนนี้)?|ฝนตก|ร้อนไหม|weather|ฝุ่น|pm ?2\.?5/i.test(text)) return 'weather';
   if (/ข่าว(เด่น|วันนี้|ล่าสุด)?|news/i.test(text)) return 'news';
   return null;
 }
@@ -589,7 +613,7 @@ async function answerWeatherQuery(displayName, userText, history = [], followUp 
   }
 
   const dayLabel = weather.isForecast ? `พยากรณ์วันที่ ${weather.forecastDate}` : 'ตอนนี้';
-  const weatherData = `${weather.location} (${dayLabel}): ${weather.temp}°C รู้สึกเหมือน ${weather.feelsLike}°C สภาพอากาศ: ${weather.description} ความชื้น ${weather.humidity}%`;
+  const weatherData = `${weather.location} (${dayLabel}): ${weather.temp}°C รู้สึกเหมือน ${weather.feelsLike}°C สภาพอากาศ: ${weather.description} ความชื้น ${weather.humidity}%${weather.pm25 != null ? ` ฝุ่น PM2.5 ตอนนี้ ${weather.pm25} µg/m³ (${pm25Label(weather.pm25)} ตามเกณฑ์กรมควบคุมมลพิษ)` : ''}`;
   return askGroq(
     `มีคนถามสภาพอากาศ ให้ตอบโดยอ้างอิงข้อมูลจริงนี้เท่านั้น ห้ามมั่วหรือเปลี่ยนตัวเลข: ${weatherData}\n\n${LONG_ANSWER_INSTRUCTION}`,
     { displayName, maxTokens: 1000, history }
@@ -860,7 +884,8 @@ async function checkApis() {
   await check(`Groq vision ${VISION_MODEL}`, () => groq.models.retrieve(VISION_MODEL));
   await check('Groq whisper-large-v3-turbo', () => groq.models.retrieve('whisper-large-v3-turbo'));
   await check('OpenWeather', async () => { if (!(await getWeatherReport())) throw new Error('no data'); });
-  await check('NewsAPI', async () => { if (!(await getDomesticNews())) throw new Error('no Thai headlines'); });
+  await check('Google News RSS', async () => { if (!(await getDomesticNews())) throw new Error('no Thai headlines'); });
+  await check('OpenWeather PM2.5', async () => { if ((await getWeatherReport())?.pm25 == null) throw new Error('no PM2.5'); });
   await check(`Gemini ${GEMINI_MODEL}`, () => {
     if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set');
     return askGemini([{ content: 'ตอบสั้นๆ' }, { role: 'user', content: 'ตอบว่า ok' }], 50);
