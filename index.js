@@ -12,7 +12,7 @@ const lineConfig = {
 };
 
 const RANDOM_REPLY_RATE = 0.1;
-const VISION_MODEL = process.env.VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
+const VISION_MODEL = process.env.VISION_MODEL || 'qwen/qwen3.8-27b';
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // Groq caps base64 images at 4MB, and base64 adds ~33%
 
 const FINISH_SENTENCE_RULE = '- สำคัญมาก: ต้องพูดให้จบประโยคและจบความคิดในตัวเองเสมอ ห้ามตัดจบกลางคัน ห้ามทิ้งท้ายค้างคาแบบยังไม่จบเรื่อง ให้วางแผนความยาวคำตอบล่วงหน้าแล้วพูดให้ครบตามที่วางแผนไว้พอดี';
