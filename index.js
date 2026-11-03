@@ -223,6 +223,78 @@ function getHistory(key) {
   return freshHistory(key).map(({ role, content }) => ({ role, content }));
 }
 
+// --- Family notebook: long-term notes learned from conversations ---
+// Kept in Upstash Redis (free) so they survive restarts; in memory only if Upstash isn't configured.
+const NOTES_KEY = 'chawee:family_notes';
+const NOTES_PER_PERSON = 15;
+let familyNotes = {}; // { "พ่อ": ["สนใจมวยไทย", ...], ... }
+
+async function redis(command) {
+  const res = await fetch(process.env.UPSTASH_REDIS_REST_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` },
+    body: JSON.stringify(command),
+  });
+  if (!res.ok) throw new Error(`Upstash HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return (await res.json()).result;
+}
+
+const hasNotesStore = () => Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+
+async function loadNotes() {
+  if (!hasNotesStore()) return;
+  familyNotes = JSON.parse((await redis(['GET', NOTES_KEY])) || '{}');
+  console.log(`📒 loaded notes for: ${Object.keys(familyNotes).join(', ') || '(none)'}`);
+}
+
+function notesBlock() {
+  const lines = Object.entries(familyNotes)
+    .filter(([, notes]) => notes.length)
+    .map(([who, notes]) => `- ${who}: ${notes.join(' / ')}`);
+  if (!lines.length) return '';
+  return `\n\nสิ่งที่คุณจำได้เกี่ยวกับคนในบ้านจากที่เคยคุยกัน (ใช้ประกอบการคุยอย่างเป็นธรรมชาติ ไม่ต้องยกมาพูดทุกครั้ง ถ้ามีคนถามว่าจำอะไรไว้บ้างก็บอกได้):\n${lines.join('\n')}`;
+}
+
+const FAMILY_SECTION = ELDEST_SON_PROMPT.slice(ELDEST_SON_PROMPT.indexOf('สมาชิกในกลุ่ม'), ELDEST_SON_PROMPT.indexOf('ตัวตน:'));
+const LEARN_PROMPT = `คุณคือผู้จดสมุดบันทึกของครอบครัว อ่านบทสนทนาล่าสุดแล้วตัดสินว่ามีอะไรควรจำระยะยาวเกี่ยวกับคนในบ้านหรือไม่
+${FAMILY_SECTION}
+จดเฉพาะสิ่งที่ช่วยให้คุยและช่วยเหลือกันดีขึ้นในอนาคต เช่น ความสนใจ งานอดิเรก ของที่ชอบ/ไม่ชอบ อาหารที่แพ้ กิจวัตร แผนสำคัญ หรือเรื่องที่มีคนสั่งว่า "จำไว้"
+ห้ามจด: คำถามทั่วไปครั้งเดียว (เช่น ถามราคาทองครั้งเดียว) ข่าว รหัสผ่าน เลขบัญชี เลขบัตร ที่อยู่ละเอียด หรือสิ่งที่เดาเอาเอง
+ถ้ามีคนสั่งให้ลืม หรือข้อมูลเดิมไม่จริงแล้ว ให้ลบโน้ตนั้น
+who ใช้ชื่อเรียกในบ้าน (พ่อ แม่ นิว ดรีม ยาย) ถ้าเป็นคนอื่นใช้ชื่อ LINE โน้ตแต่ละข้อสั้นๆ ไม่เกิน 15 คำ และอย่าจดซ้ำกับที่มีอยู่แล้ว
+ตอบเป็น JSON เท่านั้น: {"add":[{"who":"...","note":"..."}],"remove":[{"who":"...","note":"<ข้อความโน้ตเดิมตรงตัว>"}]} ถ้าไม่มีอะไรให้ตอบ {"add":[],"remove":[]}`;
+
+// Runs after a reply is sent; never blocks or breaks the chat
+async function learnFromExchange(displayName, userText, botReply) {
+  const messages = [
+    { role: 'system', content: LEARN_PROMPT },
+    {
+      role: 'user',
+      content: `โน้ตที่มีอยู่: ${JSON.stringify(familyNotes)}\n\n[${displayName || 'ไม่ทราบชื่อ'}]: ${userText}\n[ชาวี]: ${botReply}`,
+    },
+  ];
+  const text = await askSmallModel(messages, 800);
+  const json = text && text.match(/\{[\s\S]*\}/);
+  if (!json) return;
+  const { add = [], remove = [] } = JSON.parse(json[0]);
+  let changed = false;
+  for (const { who, note } of remove) {
+    const list = familyNotes[who] || [];
+    if (list.includes(note)) {
+      familyNotes[who] = list.filter((n) => n !== note);
+      changed = true;
+    }
+  }
+  for (const { who, note } of add) {
+    if (!who || !note || familyNotes[who]?.includes(note)) continue;
+    familyNotes[who] = [...(familyNotes[who] || []), note].slice(-NOTES_PER_PERSON);
+    changed = true;
+  }
+  if (!changed) return;
+  console.log(`📒 notes updated: +${add.length} -${remove.length}`);
+  if (hasNotesStore()) await redis(['SET', NOTES_KEY, JSON.stringify(familyNotes)]);
+}
+
 function appendHistory(key, displayName, userText, botReply) {
   const now = Date.now();
   const list = chatHistory.get(key) || [];
@@ -406,6 +478,26 @@ route:
 - "news" ถามข่าว
 location: ชื่อเมืองเป็นภาษาอังกฤษสำหรับค้นอากาศ เช่น Chiang Mai หรือ null ถ้าไม่ระบุ
 daysFromToday: 0 วันนี้/ตอนนี้, 1 พรุ่งนี้, 2 มะรืนนี้ หรือจำนวนวันจากวันนี้`;
+
+// Small structured tasks: gpt-oss-20b, then gpt-oss-120b, then Gemini; null if all fail
+async function askSmallModel(messages, maxTokens) {
+  for (const model of ['openai/gpt-oss-20b', 'openai/gpt-oss-120b']) {
+    try {
+      const res = await groq.chat.completions.create({ model, messages, temperature: 0, reasoning_effort: 'low', max_tokens: maxTokens });
+      const text = res.choices[0].message.content;
+      if (text) return text;
+    } catch (err) {
+      console.error(`Small model ${model} failed:`, err.message);
+    }
+  }
+  if (!process.env.GEMINI_API_KEY) return null;
+  try {
+    return await askGemini(messages, maxTokens, 0);
+  } catch (err) {
+    console.error('Small model Gemini failed:', err.message);
+    return null;
+  }
+}
 
 // Router chain: gpt-oss-20b, then gpt-oss-120b, then Gemini; a model "fails" on an error or unusable JSON
 async function routeQuestion(userText, history = []) {
@@ -638,7 +730,7 @@ async function askGroq(userText, { isRandom = false, displayName = null, maxToke
   const maxTokens = maxTokensOverride ?? (Math.random() < 0.5 ? 300 : 550);
   const { reasoning_effort, headroom, search } = MODES[mode];
   const messages = [
-    { role: 'system', content: `${PERSONA.prompt}\n\nตอนนี้คือ ${thaiNow()} (เวลาประเทศไทย)` },
+    { role: 'system', content: `${PERSONA.prompt}\n\nตอนนี้คือ ${thaiNow()} (เวลาประเทศไทย)${notesBlock()}` },
     ...history,
     { role: 'user', content: text },
   ];
@@ -870,6 +962,7 @@ async function handleEvent(event) {
       }
       const historyText = imageId ? `[ส่งรูปภาพ] ${userText}`.trim() : userText;
       if (historyKey) appendHistory(historyKey, displayName, historyText, replyText);
+      if (triggered) learnFromExchange(displayName, historyText, replyText).catch((err) => console.error('learnFromExchange failed:', err.message));
     } catch (err) {
       console.error('Groq error:', err);
       if (!triggered) return null;
@@ -1021,6 +1114,10 @@ async function checkApis() {
     });
   }
   await check('OpenWeather PM2.5', async () => { if ((await getWeatherReport())?.pm25 == null) throw new Error('no PM2.5'); });
+  await check('Upstash notes', async () => {
+    if (!hasNotesStore()) throw new Error('UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN not set (notes kept in memory only)');
+    await loadNotes();
+  });
   await check(`Gemini ${GEMINI_MODEL}`, () => {
     if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set');
     return askGemini([{ content: 'ตอบสั้นๆ' }, { role: 'user', content: 'ตอบว่า ok' }], 50);
